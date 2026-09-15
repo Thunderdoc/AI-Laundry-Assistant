@@ -11,6 +11,16 @@ const NOTE_MAX_LENGTH = 240;
 
 type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean };
 type FirebaseSettings = { enabled: boolean; firebase_config: Record<string, string> | null };
+const firebaseWebConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "",
+};
+const firebaseWebConfigured = Boolean(firebaseWebConfig.apiKey && firebaseWebConfig.authDomain && firebaseWebConfig.projectId && firebaseWebConfig.appId);
+const backendAuthAvailable = Boolean(import.meta.env.VITE_API_URL) || ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
 async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
@@ -21,7 +31,7 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
 
 function AuthGate() {
   const [user, setUser] = useState<SignedInUser | null>(null);
-  const [settings, setSettings] = useState<FirebaseSettings | null>(null);
+  const [settings, setSettings] = useState<FirebaseSettings | null>(firebaseWebConfigured ? { enabled: true, firebase_config: firebaseWebConfig } : null);
   const [authError, setAuthError] = useState("");
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [email, setEmail] = useState("");
@@ -32,8 +42,11 @@ function AuthGate() {
     let unsubscribe: (() => void) | undefined;
     void (async () => {
       try {
-        const response = await fetch(`${API}/auth/config`);
-        const config: FirebaseSettings = await response.json();
+        let config: FirebaseSettings = firebaseWebConfigured ? { enabled: true, firebase_config: firebaseWebConfig } : { enabled: false, firebase_config: null };
+        if (backendAuthAvailable) {
+          const response = await fetch(`${API}/auth/config`);
+          if (response.ok) config = await response.json();
+        }
         setSettings(config);
         if (!config.enabled || !config.firebase_config) return;
         const app = getApps().length ? getApp() : initializeApp(config.firebase_config);
@@ -46,6 +59,11 @@ function AuthGate() {
           }
           try {
             const idToken = await firebaseUser.getIdToken();
+            if (!backendAuthAvailable) {
+              localStorage.setItem("laundryai_firebase_token", idToken);
+              setUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user", picture: firebaseUser.photoURL });
+              return;
+            }
             const verified = await fetch(`${API}/auth/firebase`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },

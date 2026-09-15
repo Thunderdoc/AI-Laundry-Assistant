@@ -17,4 +17,6 @@ Build and deploy the Docker image using the existing `Dockerfile` to a container
 
 When Vercel gives you `https://your-project.vercel.app`, add `your-project.vercel.app` in Firebase Authentication → Settings → Authorized domains, then enable Google and Email/Password.
 
+To enable the login page before the API is deployed, add these **Production** environment variables in Vercel from Firebase Console → Project settings → Your apps → Web app configuration: `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, and `VITE_FIREBASE_APP_ID`. Redeploy after saving them.
+
 Do not put `FIREBASE_SERVICE_ACCOUNT_JSON` in Vercel. It is a private backend-only secret.
