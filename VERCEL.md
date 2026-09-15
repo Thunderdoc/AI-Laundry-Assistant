@@ -5,7 +5,7 @@ This Vercel configuration deploys the React website. The current ML API should r
 ## Deploy the website
 
 1. Push this project to GitHub and import it into Vercel, or run `vercel` from this project folder.
-2. Vercel reads `vercel.json`; do not change the root directory.
+2. In Vercel's project settings, set the **Root Directory** to `frontend`. The Vercel build commands then run directly inside that folder.
 3. Before deploying, add `VITE_API_URL` in Vercel → Project → Settings → Environment Variables. Its value must be your backend URL with `/api`, for example `https://laundryai-api.example.com/api`.
 4. Redeploy. The frontend will send prediction and Firebase requests to that backend.
 
