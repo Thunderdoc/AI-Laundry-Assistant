@@ -5,9 +5,13 @@ import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStat
 import { getDatabase, ref, set } from "firebase/database";
 import "./style.css";
 
-// Local production uses the same origin. On Vercel set VITE_API_URL to the
-// deployed backend, for example https://api.example.com/api.
-const API = import.meta.env.VITE_API_URL?.replace(/\/$/, "") || "/api";
+// Vercel and Render are separate deployments. Keep the known production API
+// as a safe fallback so a missing Vercel variable cannot silently disable
+// backend token verification or administrator access.
+const configuredApi = import.meta.env.VITE_API_URL?.trim().replace(/\/$/, "");
+const API = configuredApi || (window.location.hostname.endsWith("vercel.app")
+  ? "https://ai-laundry-assistant.onrender.com/api"
+  : "/api");
 const NOTE_MAX_LENGTH = 240;
 
 type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean; is_admin?: boolean };
@@ -22,7 +26,7 @@ const firebaseWebConfig = {
   databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || "",
 };
 const firebaseWebConfigured = Boolean(firebaseWebConfig.apiKey && firebaseWebConfig.authDomain && firebaseWebConfig.projectId && firebaseWebConfig.appId);
-const backendAuthAvailable = Boolean(import.meta.env.VITE_API_URL) || ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const backendAuthAvailable = Boolean(API);
 
 async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
