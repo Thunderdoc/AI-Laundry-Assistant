@@ -61,7 +61,9 @@ function AuthGate() {
           }
         });
       } catch {
-        setAuthError("Could not reach the authentication service. Start the backend and try again.");
+        // A frontend-only Vercel deployment has no API yet. Keep the site usable
+        // in preview mode until a backend URL is configured.
+        setSettings({ enabled: false, firebase_config: null });
       }
     })();
     return () => unsubscribe?.();

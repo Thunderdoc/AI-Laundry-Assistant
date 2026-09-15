@@ -2401,6 +2401,13 @@ footer.app-footer {
   }
 }
 
+@media (min-width: 769px) and (max-width: 1200px) {
+  .login-shell { grid-template-columns: 86px minmax(370px, 1fr) minmax(0, .9fr); }
+  .login-panel { width: min(460px, calc(100% - 36px)); padding: 42px 36px 36px; }
+  .login-aside { padding: 38px; }
+  .login-aside h2 { font-size: clamp(36px, 4.2vw, 49px); }
+}
+
 @media (max-width: 768px) {
   .login-shell { grid-template-columns: 1fr; padding: 0; background: #fff; }
   .login-shell > section, .login-aside { border-radius: 0; }
