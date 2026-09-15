@@ -17,7 +17,16 @@ def _value(name: str) -> str:
 
 
 def enabled() -> bool:
-    return _value("PERSISTENCE_BACKEND").lower() == "firebase"
+    mode = _value("PERSISTENCE_BACKEND").lower()
+    if mode:
+        return mode == "firebase"
+    # Production-safe auto mode: if every Firebase server setting exists, use
+    # durable storage instead of silently writing to Render's ephemeral disk.
+    return bool(
+        _value("FIREBASE_DATABASE_URL")
+        and _value("FIREBASE_STORAGE_BUCKET")
+        and (_value("FIREBASE_SERVICE_ACCOUNT_JSON") or _value("FIREBASE_SERVICE_ACCOUNT_FILE"))
+    )
 
 
 def configured() -> bool:
@@ -59,12 +68,20 @@ def _bucket():
 
 
 def status(probe: bool = False) -> dict[str, Any]:
+    requirements = {
+        "FIREBASE_DATABASE_URL": bool(_value("FIREBASE_DATABASE_URL")),
+        "FIREBASE_STORAGE_BUCKET": bool(_value("FIREBASE_STORAGE_BUCKET")),
+        "FIREBASE_SERVICE_ACCOUNT": bool(_value("FIREBASE_SERVICE_ACCOUNT_JSON") or _value("FIREBASE_SERVICE_ACCOUNT_FILE")),
+    }
     state: dict[str, Any] = {
         "backend": "firebase" if enabled() else "local",
         "configured": configured() if enabled() else True,
         "database": "realtime-database" if enabled() else "sqlite",
         "image_storage": "firebase-storage" if enabled() else "local-filesystem",
+        "selection": _value("PERSISTENCE_BACKEND").lower() or "auto",
     }
+    if not enabled():
+        state["firebase_missing"] = [name for name, present in requirements.items() if not present]
     if probe and enabled() and state["configured"]:
         try:
             _root("system/persistenceProbe").get()

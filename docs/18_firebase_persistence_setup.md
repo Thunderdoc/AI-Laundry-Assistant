@@ -20,6 +20,8 @@ FIREBASE_DATABASE_URL=https://laundry-ai-70989-default-rtdb.asia-southeast1.fire
 PERSISTENCE_BACKEND=firebase
 ```
 
+If this variable is absent, the backend now selects Firebase automatically when the database URL, storage bucket, and service-account credential are all present. An explicit `local` value always keeps the development fallback.
+
 The following existing variables must also be valid:
 
 ```text
