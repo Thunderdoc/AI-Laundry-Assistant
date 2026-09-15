@@ -72,9 +72,7 @@ body {
 }
 
 /* Authentication */
-.login-shell { min-height: 100vh; display: grid; grid-template-columns: 112px minmax(385px, .9fr) minmax(420px, 1.35fr); background: #e5f0ea; overflow: hidden; }
-.login-rail { display: grid; place-items: center; background: #075c48; box-shadow: 6px 0 16px rgba(5, 69, 54, .16); z-index: 2; }
-.login-rail span { color: white; font-size: 31px; font-weight: 850; letter-spacing: 2px; writing-mode: vertical-rl; transform: rotate(180deg); }
+.login-shell { min-height: 100vh; display: grid; grid-template-columns: minmax(385px, .9fr) minmax(420px, 1.35fr); background: #e5f0ea; overflow: hidden; }
 .login-panel { align-self: center; display: flex; flex-direction: column; width: min(490px, calc(100% - 60px)); margin: auto; padding: 54px 56px 46px; border-radius: 31px; background: #b8d8ca; box-shadow: 0 12px 0 rgba(8, 83, 65, .14), 0 19px 30px rgba(20, 82, 65, .2); }
 .login-shell > section { background: #b8d8ca; }
 .login-brand { display: flex; align-items: center; gap: 10px; color: #064c3b; font-size: 19px; font-weight: 850; letter-spacing: -.7px; margin-bottom: 34px; }
@@ -95,18 +93,22 @@ body {
 .email-login-submit, .google-login { width: 100%; min-height: 46px; border-radius: 10px; cursor: pointer; font: inherit; font-weight: 750; transition: .18s ease; }
 .email-login-submit { border: 1px solid #075c48; background: #075c48; color: #fff; margin-top: 4px; letter-spacing: .4px; }
 .email-login-submit:hover { background: #054536; transform: translateY(-1px); }
+.forgot-password { justify-self: end; margin: -5px 0 0; padding: 0; border: 0; background: transparent; color: #075c48; cursor: pointer; font: inherit; font-size: 12px; font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
+.forgot-password:hover { color: #043e30; }
+.forgot-password:disabled { cursor: not-allowed; opacity: .6; }
 .google-login { display: flex; justify-content: center; align-items: center; gap: 11px; border: 1px solid #c9e1d5; background: #eff8f3; color: #075c48; }
 .google-login:hover { border-color: #075c48; background: #fff; }
 .google-g { font: 700 20px Arial, sans-serif; color: #4285f4; }
 .auth-switch { align-self: center; border: 0; background: transparent; color: #075c48; padding: 13px 4px 3px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700; }
 .auth-divider { display: flex; align-items: center; gap: 12px; color: #477264; font-size: 12px; margin: 16px 0; }
 .auth-divider::before, .auth-divider::after { content: ""; height: 1px; background: rgba(7,92,72,.26); flex: 1; }
-.login-loading, .auth-setup, .login-error { border-radius: 10px; padding: 13px; font-size: 13px; }
+.login-loading, .auth-setup, .login-error, .login-notice { border-radius: 10px; padding: 13px; font-size: 13px; }
 .login-loading { color: #245e4d; background: #e5f3eb; }
 .auth-setup { background: #def0e6; border: 1px solid #9cc8b3; color: #155640; }
 .guest-entry { margin-top: 14px; }
 .guest-entry span { font-size: 18px; margin-left: 5px; }
 .login-error { margin-top: 14px !important; color: #9d2c2c !important; background: var(--danger-light); border: 1px solid var(--danger-border); }
+.login-notice { margin-top: 14px !important; color: #155640 !important; background: #e4f5eb; border: 1px solid #9cc8b3; }
 .login-panel small { color: #396c5c; font-size: 11px; text-align: center; margin-top: 22px; }
 .login-aside { min-height: 100%; position: relative; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; padding: clamp(38px, 6vw, 86px); color: #f8fcf9; background: #075c48; }
 .login-aside-content { position: relative; z-index: 1; margin-top: auto; max-width: 520px; }
@@ -2402,20 +2404,17 @@ footer.app-footer {
 }
 
 @media (min-width: 769px) and (max-width: 1200px) {
-  .login-shell { grid-template-columns: 86px minmax(370px, 1fr) minmax(0, .9fr); }
+  .login-shell { grid-template-columns: minmax(370px, 1fr) minmax(0, .9fr); }
   .login-panel { width: min(460px, calc(100% - 36px)); padding: 42px 36px 36px; }
   .login-aside { padding: 38px; }
   .login-aside h2 { font-size: clamp(36px, 4.2vw, 49px); }
 }
 
 @media (max-width: 768px) {
-  .login-shell { grid-template-columns: 1fr; padding: 0; background: #fff; }
-  .login-shell > section, .login-aside { border-radius: 0; }
-  .login-panel { width: min(100% - 40px, 450px); padding: 34px 0 42px; }
-  .login-brand { margin-bottom: 27px; }
-  .login-aside { min-height: 380px; padding: 34px 24px; }
-  .login-aside h2 { font-size: 40px; }
-  .login-flow { margin-top: 26px; }
+  .login-shell { display: block; min-height: 100svh; padding: 20px; background: #e5f0ea; overflow: auto; }
+  .login-panel { width: min(100%, 460px); min-height: calc(100svh - 40px); justify-content: center; padding: 32px 24px; border-radius: 24px; }
+  .login-brand { margin-bottom: 25px; }
+  .login-aside { display: none; }
   header.app-header {
     height: auto;
     padding: 14px 5%;

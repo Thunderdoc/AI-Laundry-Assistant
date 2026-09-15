@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithEmailAndPassword, signInWithRedirect, signOut } from "firebase/auth";
+import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithRedirect, signOut } from "firebase/auth";
 import "./style.css";
 
 // Local production uses the same origin. On Vercel set VITE_API_URL to the
@@ -37,6 +37,7 @@ function AuthGate() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isRegistering, setIsRegistering] = useState(false);
+  const [authNotice, setAuthNotice] = useState("");
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -119,6 +120,23 @@ function AuthGate() {
     }
   };
 
+  const handlePasswordReset = async () => {
+    if (!settings?.firebase_config) return;
+    if (!email.trim()) {
+      setAuthError("Enter your email address first, then select Forgot password.");
+      return;
+    }
+    setAuthError("");
+    setAuthNotice("");
+    try {
+      const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
+      await sendPasswordResetEmail(getAuth(app), email.trim());
+      setAuthNotice("Password-reset email sent. Check your inbox and spam folder.");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Could not send the password-reset email.");
+    }
+  };
+
   const handleSignOut = async () => {
     if (getApps().length) await signOut(getAuth(getApp()));
     localStorage.removeItem("laundryai_firebase_token");
@@ -132,7 +150,6 @@ function AuthGate() {
   if (user) return <App user={user} onSignOut={handleSignOut} />;
   return (
     <main className="login-shell">
-      <aside className="login-rail" aria-label="LaundryAI"><span>LaundryAI</span></aside>
       <section className="login-panel" aria-labelledby="login-title">
         <div className="login-brand"><div className="login-mark">🧺</div><span>Laundry<span>AI</span></span></div>
         <p className="login-eyebrow">FABRIC CARE INTELLIGENCE</p>
@@ -143,6 +160,7 @@ function AuthGate() {
             <form className={`email-login ${settings.enabled ? "" : "credentials-disabled"}`} onSubmit={handleEmailLogin}>
               <label>Email<input type="email" autoComplete="email" required disabled={!settings.enabled} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
               <label>Password<input type="password" autoComplete={isRegistering ? "new-password" : "current-password"} minLength={6} required disabled={!settings.enabled} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" /></label>
+              {!isRegistering && <button className="forgot-password" type="button" onClick={handlePasswordReset} disabled={!settings.enabled || isSigningIn}>Forgot password?</button>}
               <button className="email-login-submit" disabled={!settings.enabled || isSigningIn}>{isSigningIn ? "Please wait…" : isRegistering ? "CREATE ACCOUNT" : "LOGIN"}</button>
             </form>
             {settings.enabled ? <>
@@ -157,6 +175,7 @@ function AuthGate() {
             </>}
           </>
         )}
+        {authNotice && <p className="login-notice" role="status">{authNotice}</p>}
         {authError && <p className="login-error" role="alert">{authError}</p>}
         <small>Care labels always remain the final authority.</small>
       </section>
