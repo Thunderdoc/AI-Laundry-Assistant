@@ -43,25 +43,21 @@ class UserStatusUpdate(BaseModel):
     disabled: bool
 
 def firebase_auth_enabled() -> bool:
-    """Require login only after both the browser config and server credential exist."""
-    has_web_config = all(FIREBASE_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId"))
-    has_server_credential = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")) or bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE", ""))
-    return has_web_config and has_server_credential
+    """Token verification needs the Firebase project identity, not a private key."""
+    return all(FIREBASE_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId"))
 
 def verify_firebase_token(id_token: str):
-    """Verify a Firebase ID token using server-only service-account credentials."""
-    account_file = os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE", "")
-    account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+    """Verify signature, issuer, audience, and expiry using Google's public certificates."""
     if not firebase_auth_enabled():
-        raise HTTPException(503, "Firebase authentication is not configured on the server.")
-    if account_file and not os.path.isfile(account_file):
-        raise HTTPException(503, "Firebase service-account file was not found on the server.")
+        raise HTTPException(503, "Firebase project configuration is missing on the server.")
     try:
-        # Signature/audience/expiry verification is sufficient for normal API
-        # requests and avoids an additional Identity Toolkit lookup on every
-        # call. Disabled accounts have their refresh tokens revoked by the admin
-        # endpoint, so their short-lived ID token expires naturally.
-        return firebase_admin_auth_client().verify_id_token(id_token)
+        from google.auth.transport.requests import Request as GoogleRequest
+        from google.oauth2 import id_token as google_id_token
+        return google_id_token.verify_firebase_token(
+            id_token,
+            GoogleRequest(),
+            audience=FIREBASE_CONFIG["projectId"],
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -73,7 +69,7 @@ def verify_firebase_token(id_token: str):
         elif error_name in {"InvalidIdTokenError", "InvalidSessionCookieError", "ValueError"}:
             detail="Firebase returned an invalid sign-in token."
         else:
-            detail=f"Firebase server credentials could not verify sign-in ({error_name})."
+            detail=f"Firebase could not verify sign-in ({error_name})."
         raise HTTPException(401, detail) from exc
 
 def is_admin(user: dict | None) -> bool:
@@ -85,7 +81,7 @@ def is_admin(user: dict | None) -> bool:
 
 def require_admin(request: Request) -> dict:
     if not firebase_auth_enabled():
-        raise HTTPException(503, "Secure admin access requires Firebase server credentials.")
+        raise HTTPException(503, "Secure admin access requires Firebase project configuration.")
     user = getattr(request.state, "user", None)
     if not is_admin(user):
         raise HTTPException(403, "Administrator access is required.")
