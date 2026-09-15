@@ -1039,7 +1039,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 <span className="serif">Understand the Care.</span>
               </h1>
               <p className="lead">
-                AI-powered fabric intelligence that analyzes garment images, identifies textile composition, and recommends safer, smarter, and more sustainable care.
+                AI-powered fabric intelligence that analyzes garment images, estimates the most likely fabric class, and recommends safer, smarter, and more sustainable care.
               </p>
               <div className="hero-actions">
                 <button className="btn btn-primary" onClick={() => setPage("analyze")}>
