@@ -1,0 +1,11 @@
+backend/
+data/
+docs/
+frontend/node_modules/
+frontend/dist/
+*.zip
+*.pt
+*.db
+.venv/
+**/__pycache__/
+firebase-service-account.json

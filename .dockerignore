@@ -1,0 +1,11 @@
+.git
+**/.venv
+**/node_modules
+data
+backend/laundryai.db
+frontend/src
+docs
+*.pyc
+__pycache__
+.env
+firebase-service-account.json

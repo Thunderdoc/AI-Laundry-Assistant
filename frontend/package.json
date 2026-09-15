@@ -1,0 +1,1 @@
+{"type":"module","scripts":{"dev":"vite","build":"tsc -b && vite build"},"dependencies":{"@vitejs/plugin-react":"latest","firebase":"^12.19.0","react":"latest","react-dom":"latest","typescript":"latest","vite":"latest"},"devDependencies":{"@types/react":"latest","@types/react-dom":"latest"}}

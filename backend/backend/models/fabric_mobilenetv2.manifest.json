@@ -1,0 +1,31 @@
+{
+  "architecture": "MobileNetV2 transfer learning",
+  "classes": [
+    "cotton",
+    "polyester",
+    "denim",
+    "wool",
+    "silk",
+    "non_fabric"
+  ],
+  "input_size": 224,
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "val_images": 282,
+  "val_accuracy": 0.8262,
+  "test_images": 282,
+  "test_accuracy": 0.7624,
+  "test_inference_seconds": 0.9142,
+  "min_confidence": 0.55,
+  "min_margin": 0.2423
+}

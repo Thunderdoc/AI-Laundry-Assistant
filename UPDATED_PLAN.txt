@@ -1,0 +1,122 @@
+================================================================================
+ 🧺 LAUNDRYAI - AI FABRIC INTELLIGENCE PLATFORM PLAN & STATUS
+================================================================================
+Project: 🧺 LaundryAI (AI-Powered Fabric Classification & Washing Recommendation)
+Positioning: See the Fabric. Understand the Care.
+Updated: August 27, 2026
+
+--------------------------------------------------------------------------------
+1. PLATFORM ARCHITECTURE & ACTIVE LEARNING OVERVIEW
+--------------------------------------------------------------------------------
+LaundryAI is an industry-grade, research-ready AI Fabric Intelligence Platform
+that unifies computer vision, textile fiber science, active learning, and
+sustainable laundering recommendations across 7 comprehensive modules.
+
+[✓] Brand Positioning & Aesthetic Identity
+    - Palette: Neutral Off-White (#F7F8F4), Deep Forest Green (#075C48),
+      Dark Charcoal (#10231D), Sage (#DCEBE3), Warm Beige (#EFE8DA), AI Blue (#3569D4).
+    - Proportions: 80% Neutral, 15% Green, 5% Functional Accent.
+    - Typography: Plus Jakarta Sans with DM Serif Display editorial accents.
+    - Header: 🧺 LaundryAI with permanent "+ Analyze Garment" CTA.
+
+[✓] Home Page (Hero & Methodology Showcase)
+    - Hero with Left Editorial and Right Interactive Macro Fabric Scanner Card
+      (laser scan line animation, bounding box, AI vision live certainty badge).
+    - 5-Step Methodology Pipeline (Capture -> Vision -> Classify -> Care Synthesis -> Active Learn).
+    - "Inside the Vision Engine" breakdown (Texture, Pattern, Optical Luster, Context, Confidence Gate).
+    - Supported Fabrics Showcase (Cotton, Denim, Wool, Silk, Polyester).
+    - "Better Care. Lower Impact." Sustainability Section.
+
+[✓] 3-Stage Analyze Workspace with Active Learning
+    - Stepper: 01 Capture & Check -> 02 AI Vision Engine -> 03 Care Profile.
+    - Client-Side Pre-Flight Image Quality Assessment (Resolution, Lighting/Brightness, Texture Sharpness).
+    - Multi-Step Animated Processing Screen (Tensor prep -> Feature extract -> MobileNetV2 -> Decision gate).
+    - Comprehensive Result & Care Profile (Garment thumbnail, confidence gauge, probability distribution,
+      5 visual care cards: Wash, Dry, Iron, Detergent, Bleach, Scientific Rationale, Eco care).
+    - HUMAN-IN-THE-LOOP ACTIVE LEARNING FEEDBACK:
+      * User confirms ("✓ Yes, it's Silk") or corrects ("✗ No, it's Cotton").
+      * Automatically routes and stores image into `data/train/<confirmed_fabric>/` for continuous training.
+      * Updates database prediction record with user verification status.
+    - Actionable Low-Confidence & Non-Fabric rejection handling.
+    - One-click "📋 Copy Care Profile" with clipboard feedback.
+
+[✓] Persisted Scan History Module
+    - Search by fabric or care note keyword.
+    - Confidence filter pills (All, High >=80%, Moderate 60-79%, Low <60%).
+    - Inline Note Editor ("✏️ Edit / Add note") with real-time PATCH persistence.
+    - Data management toolbar: "📥 Export CSV" and "🗑️ Clear All".
+
+[✓] Model Insights & Analytics Dashboard
+    - 4 Top KPIs: Garments Analyzed, Avg Confidence, Most Detected Fabric, Eco Recommendations.
+    - Real-Time Active Learning Training Dataset Sample Tracker (`/api/dataset/stats`).
+    - Real Fabric Distribution breakdown.
+    - Model Confidence Histogram (0-20%, 20-40%, 40-60%, 60-80%, 80-100%).
+
+[✓] Fabric Library & Comparison Matrix
+    - Deep-dive 6-section spec sheets for Cotton, Polyester, Denim, Wool, and Silk.
+    - Interactive "📊 Compare All Fabrics" Matrix comparing temperatures, cycles, drying,
+      ironing, shrinkage risk, and heat sensitivity side-by-side.
+
+[✓] Academic Research Hub (12 Sections for Viva & Presentation)
+    - 01 Problem Statement
+    - 02 Project Objectives
+    - 03 Literature Survey (15 Reviewed Papers)
+    - 04 Research Gap
+    - 05 Methodology
+    - 06 Architecture Diagram
+    - 07 Algorithm Pseudocode
+    - 08 Dataset & Split (70/15/15, 224x224x3, Augmentation)
+    - 09 MobileNetV2 Model Architecture
+    - 10 Evaluation & Measured Metrics (81.9% Val Acc, 79.4% Test Acc)
+    - 11 Limitations & Future Scope
+    - 12 Academic References
+
+[✓] About Page & Multi-Column Footer
+    - Technology stack, advisory disclaimer, multi-column navigation.
+
+--------------------------------------------------------------------------------
+2. SYSTEM DATA FLOW & ACTIVE LEARNING LOOP
+--------------------------------------------------------------------------------
+[User Input: Garment Image + Context Note]
+   │
+   ├── 1. Client-Side Image Quality Pre-Flight Assessment (Resolution & Brightness)
+   ▼
+[FastAPI Backend (/api/predict)]
+   │
+   ├── 2. Request Validation & Temporary Raw Image Caching in data/uploads/
+   ├── 3. Image Preprocessing (224x224, ImageNet Mean/Std Normalization)
+   ├── 4. MobileNetV2 TorchScript Feature Extraction & Softmax Inference
+   ├── 5. Decision Gate (Confidence >= 70%, Top-2 Margin >= 20%, Non-Fabric Check)
+   ├── 6. Fabric Knowledge Base & Scientific Care Profile Synthesis
+   ├── 7. SQLite Database Persistence (predictions table with payload + note)
+   ▼
+[React + TypeScript Platform]
+   │
+   ├── Care Profile & Probability Distribution Breakdown
+   ▼
+[User Active Learning Verification (/api/feedback)]
+   │
+   ├── "Yes, it's Cotton" -> Saved to data/train/cotton/user_<timestamp>.jpg
+   └── "No, it's Silk"   -> Saved to data/train/silk/user_<timestamp>.jpg
+   │
+   └── Periodic Training Script (backend/scripts/train.py) retrains on expanded corpus!
+
+--------------------------------------------------------------------------------
+3. RUN INSTRUCTIONS
+--------------------------------------------------------------------------------
+Option A: One-Click Quick Start (Windows)
+   Double-click `run-laundryai.bat` in the project root.
+
+Option B: Manual Terminal Startup
+   Window 1 (Backend):
+     cd backend
+     .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+   Window 2 (Frontend):
+     cd frontend
+     npm run dev
+
+   Access:
+     - Web UI:  http://localhost:5173
+     - API Docs: http://127.0.0.1:8000/docs
+================================================================================

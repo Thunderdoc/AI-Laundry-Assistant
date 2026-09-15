@@ -1,0 +1,470 @@
+import io, os, json, sqlite3, csv, uuid, shutil
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Optional
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Body, Response, Request
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+from PIL import Image, ImageStat
+from .knowledge_base import FABRICS, recommendation
+
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
+app = FastAPI(title="LaundryAI API", version="0.1.0", description="Experimental fabric-care service. Predictions require an exported trained model.")
+app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+
+FIREBASE_CONFIG = {
+    "apiKey": os.getenv("FIREBASE_API_KEY", ""),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN", ""),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID", ""),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET", ""),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID", ""),
+    "appId": os.getenv("FIREBASE_APP_ID", ""),
+}
+
+class FirebaseCredential(BaseModel):
+    id_token: str
+
+def firebase_auth_enabled() -> bool:
+    """Require login only after both the browser config and server credential exist."""
+    has_web_config = all(FIREBASE_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId"))
+    has_server_credential = bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")) or bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE", ""))
+    return has_web_config and has_server_credential
+
+def verify_firebase_token(id_token: str):
+    """Verify a Firebase ID token using server-only service-account credentials."""
+    account_file = os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE", "")
+    account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+    if not firebase_auth_enabled():
+        raise HTTPException(503, "Firebase authentication is not configured on the server.")
+    if account_file and not os.path.isfile(account_file):
+        raise HTTPException(503, "Firebase service-account file was not found on the server.")
+    try:
+        import firebase_admin
+        from firebase_admin import auth, credentials
+        if not firebase_admin._apps:
+            service_account = json.loads(account_json) if account_json else account_file
+            firebase_admin.initialize_app(credentials.Certificate(service_account))
+        return auth.verify_id_token(id_token, check_revoked=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(401, "Google sign-in could not be verified.") from exc
+
+@app.middleware("http")
+async def require_firebase_auth(request: Request, call_next):
+    path = request.url.path
+    public_api = {"/api/health", "/api/auth/config", "/api/auth/firebase"}
+    if firebase_auth_enabled() and path.startswith("/api/") and path not in public_api:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return Response(status_code=401, content='{"detail":"Sign in is required."}', media_type="application/json")
+        try:
+            request.state.user = verify_firebase_token(auth_header.removeprefix("Bearer ").strip())
+        except HTTPException as exc:
+            return Response(status_code=exc.status_code, content=json.dumps({"detail": exc.detail}), media_type="application/json")
+    return await call_next(request)
+
+DB_PATH=os.path.abspath(os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "..", "laundryai.db")))
+DATA_DIR=os.path.abspath(os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "data")))
+UPLOADS_DIR=os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+NON_FABRIC="non_fabric"
+
+@contextmanager
+def connection():
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, fabric TEXT NOT NULL, confidence REAL NOT NULL, payload TEXT NOT NULL)")
+        yield db
+        db.commit()
+    finally:
+        db.close()
+
+def saved_history():
+    with connection() as db: return [json.loads(row["payload"]) for row in db.execute("SELECT payload FROM predictions ORDER BY id DESC")]
+
+MODEL_PATH=os.path.abspath(os.getenv("MODEL_PATH", os.path.join(os.path.dirname(__file__), "..", "models", "fabric_mobilenetv2.pt")))
+
+def manifest_path(): return os.path.splitext(MODEL_PATH)[0] + ".manifest.json"
+
+def load_manifest():
+    path=manifest_path()
+    if not os.path.exists(path): return {}
+    try:
+        with open(path, encoding="utf-8") as f: return json.load(f)
+    except Exception: return {}
+
+def model_labels():
+    classes=load_manifest().get("classes")
+    if isinstance(classes, list):
+        allowed={*FABRICS.keys(), NON_FABRIC}
+        ordered=[c for c in classes if c in allowed]
+        if set(FABRICS).issubset(set(ordered)):
+            return ordered
+    return list(FABRICS)
+
+def labels():
+    ordered=[c for c in model_labels() if c in FABRICS]
+    return ordered if len(ordered)==len(FABRICS) else list(FABRICS)
+
+def decision_thresholds():
+    manifest=load_manifest()
+    min_confidence=manifest.get("min_confidence", 0.35)
+    min_margin=manifest.get("min_margin", 0.08)
+    try: min_confidence=float(min_confidence)
+    except Exception: min_confidence=0.35
+    try: min_margin=float(min_margin)
+    except Exception: min_margin=0.08
+    return max(0.0, min(1.0, min_confidence)), max(0.0, min(1.0, min_margin))
+
+def preprocess_config():
+    manifest=load_manifest()
+    input_size=manifest.get("input_size", 224)
+    normalization=manifest.get("normalization", {})
+    mean=normalization.get("mean", [0.485,0.456,0.406])
+    std=normalization.get("std", [0.229,0.224,0.225])
+    try: input_size=int(input_size)
+    except Exception: input_size=224
+    if not isinstance(mean, list) or len(mean)!=3: mean=[0.485,0.456,0.406]
+    if not isinstance(std, list) or len(std)!=3: std=[0.229,0.224,0.225]
+    return max(32, input_size), [float(x) for x in mean], [float(x) for x in std]
+
+@app.get("/api/health")
+def health(): return {"status":"ok", "model_ready":os.path.exists(MODEL_PATH)}
+
+@app.get("/api/auth/config")
+def firebase_auth_config():
+    configured = firebase_auth_enabled()
+    return {"enabled": configured, "firebase_config": FIREBASE_CONFIG if configured else None}
+
+@app.post("/api/auth/firebase")
+def firebase_login(payload: FirebaseCredential):
+    user = verify_firebase_token(payload.id_token)
+    return {
+        "uid": user.get("uid"),
+        "email": user.get("email"),
+        "name": user.get("name") or user.get("email", "LaundryAI user").split("@")[0],
+        "picture": user.get("picture"),
+    }
+
+@app.get("/api/fabrics")
+def fabrics(): return [{"id":k, "properties":v["properties"]} for k,v in FABRICS.items()]
+
+@app.get("/api/fabrics/{fabric}")
+def fabric(fabric:str):
+    if fabric not in FABRICS: raise HTTPException(404,"Unsupported fabric")
+    return {"id":fabric, **recommendation(fabric)}
+
+@app.post("/api/predict", summary="Predict fabric from an image")
+async def predict(image:UploadFile=File(...), note:Optional[str]=Form(None)):
+    if note is not None:
+        note=note.strip()
+        if len(note)>240:
+            raise HTTPException(422,"Note cannot exceed 240 characters.")
+        if not note:
+            note=None
+    kind=(image.content_type or "").split(";")[0].strip().lower()
+    if kind not in {"image/jpeg","image/png","image/webp","application/octet-stream",""}: raise HTTPException(415,"Upload JPG, PNG, or WEBP.")
+    data=await image.read()
+    if not data or len(data)>10*1024*1024: raise HTTPException(413,"Image must be between 1 byte and 10 MB.")
+    try:
+        im=Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception: raise HTTPException(422,"Invalid image.")
+    
+    # Save raw upload for active learning feedback
+    image_token = f"upload_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
+    upload_path = os.path.join(UPLOADS_DIR, image_token)
+    try:
+        im.save(upload_path, format="JPEG", quality=95)
+    except Exception:
+        pass
+
+    sample=ImageStat.Stat(im.resize((64,64)))
+    texture=round(sum(sample.stddev)/3,1)
+    quality={"width":im.width,"height":im.height,"brightness":round(sum(sample.mean)/3,1),"texture":texture,"warning": im.width<224 or im.height<224}
+    if not os.path.exists(MODEL_PATH): raise HTTPException(503, "Trained model artifact not found. Install/export the real model before predicting.")
+    names=model_labels(); preview=False
+    try:
+        import torch, numpy as np
+        model=torch.jit.load(MODEL_PATH, map_location="cpu").eval()
+        input_size, mean, std=preprocess_config()
+        pixels=np.asarray(im.resize((input_size,input_size)), dtype=np.float32)/255.0
+        tensor=torch.from_numpy(pixels).permute(2,0,1).unsqueeze(0)
+        tensor=(tensor-torch.tensor(mean).view(1,3,1,1))/torch.tensor(std).view(1,3,1,1)
+        with torch.no_grad(): probabilities=torch.softmax(model(tensor),dim=1).squeeze().tolist()
+        if len(probabilities)!=len(names): raise ValueError("Model output does not match configured labels")
+        probabilities=list(probabilities)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Model inference failed: {str(exc)}")
+    ranked=sorted(zip(names,probabilities), key=lambda x:x[1], reverse=True)
+    fabric, confidence=ranked[0]
+    second=ranked[1][1] if len(ranked)>1 else 0.0
+    margin=confidence-second
+    min_confidence, min_margin=decision_thresholds()
+    accepted_model=confidence>=min_confidence and margin>=min_margin
+    accepted_fabric=accepted_model and fabric in FABRICS
+    detected_non_fabric=accepted_model and fabric==NON_FABRIC
+    if confidence<min_confidence: decision_reason=f"Low confidence ({round(confidence*100,2)}%) below required {round(min_confidence*100,2)}%."
+    elif margin<min_margin: decision_reason=f"Prediction is ambiguous; top-2 margin {round(margin*100,2)}% below required {round(min_margin*100,2)}%."
+    elif detected_non_fabric: decision_reason="Detected non-fabric content."
+    else: decision_reason=None
+    output_fabric=fabric if (accepted_fabric or detected_non_fabric) else "unknown"
+    record={
+        "created_at":datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "fabric":output_fabric,
+        "confidence":round(confidence*100,2),
+        "note":note,
+        "image_token":image_token,
+        "alternatives":[{"fabric":name,"confidence":round(score*100,2)} for name,score in ranked],
+        "quality":quality,
+        "recommendation":recommendation(fabric) if accepted_fabric else None,
+        "preview":preview,
+        "model_decision":{
+            "accepted":accepted_fabric,
+            "detected_non_fabric":detected_non_fabric,
+            "reason":decision_reason,
+            "top_fabric":fabric,
+            "top_confidence":round(confidence*100,2),
+            "top2_margin":round(margin*100,2),
+            "thresholds":{
+                "min_confidence":round(min_confidence*100,2),
+                "min_margin":round(min_margin*100,2)
+            }
+        }
+    }
+    with connection() as db:
+        cursor=db.execute("INSERT INTO predictions (created_at,fabric,confidence,payload) VALUES (?,?,?,?)",(record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
+        record["id"]=cursor.lastrowid
+        db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
+    return record
+
+@app.post("/api/feedback", summary="Human-in-the-loop active learning feedback")
+def feedback(payload: dict = Body(...)):
+    pred_id = payload.get("prediction_id")
+    image_token = payload.get("image_token")
+    confirmed_fabric = str(payload.get("confirmed_fabric", "")).strip().lower()
+    was_correct = bool(payload.get("was_prediction_correct", False))
+
+    if confirmed_fabric not in FABRICS and confirmed_fabric != NON_FABRIC:
+        raise HTTPException(422, f"Invalid fabric label: {confirmed_fabric}")
+
+    saved_path = None
+    if image_token:
+        src = os.path.join(UPLOADS_DIR, image_token)
+        if os.path.exists(src):
+            target_dir = os.path.join(DATA_DIR, "train", confirmed_fabric)
+            os.makedirs(target_dir, exist_ok=True)
+            target_name = f"user_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.jpg"
+            dest = os.path.join(target_dir, target_name)
+            shutil.copyfile(src, dest)
+            saved_path = os.path.relpath(dest, start=os.path.dirname(DATA_DIR))
+
+    if pred_id:
+        with connection() as db:
+            row = db.execute("SELECT payload FROM predictions WHERE id=?", (pred_id,)).fetchone()
+            if row:
+                rec = json.loads(row["payload"])
+                rec["user_feedback"] = {
+                    "confirmed_fabric": confirmed_fabric,
+                    "was_correct": was_correct,
+                    "saved_to_dataset": bool(saved_path),
+                    "saved_path": saved_path,
+                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                }
+                db.execute("UPDATE predictions SET payload=? WHERE id=?", (json.dumps(rec), pred_id))
+
+    return {
+        "status": "success",
+        "confirmed_fabric": confirmed_fabric,
+        "was_correct": was_correct,
+        "saved_to_dataset": bool(saved_path),
+        "saved_path": saved_path,
+        "message": f"Sample verified as {confirmed_fabric.capitalize()} and integrated into the active training dataset."
+    }
+
+@app.get("/api/dataset/stats", summary="Get training dataset sample counts")
+def dataset_stats():
+    train_dir = os.path.join(DATA_DIR, "train")
+    stats = {}
+    total = 0
+    user_contributed = 0
+    if os.path.exists(train_dir):
+        for item in [*FABRICS.keys(), NON_FABRIC]:
+            class_dir = os.path.join(train_dir, item)
+            if os.path.isdir(class_dir):
+                files = [f for f in os.listdir(class_dir) if os.path.isfile(os.path.join(class_dir, f))]
+                count = len(files)
+                user_count = sum(1 for f in files if f.startswith("user_"))
+                stats[item] = {"total": count, "user_verified": user_count}
+                total += count
+                user_contributed += user_count
+            else:
+                stats[item] = {"total": 0, "user_verified": 0}
+    return {
+        "total_samples": total,
+        "user_contributed": user_contributed,
+        "classes": stats
+    }
+
+@app.get("/api/history")
+def get_history(): return saved_history()
+
+@app.get("/api/history/{record_id}")
+def get_one_history(record_id:int):
+    for item in saved_history():
+        if item["id"]==record_id: return item
+    raise HTTPException(404,"Analysis not found")
+
+@app.patch("/api/history/{record_id}/note")
+def update_history_note(record_id:int, payload:dict=Body(...)):
+    new_note=payload.get("note")
+    if new_note is not None:
+        new_note=str(new_note).strip()
+        if len(new_note)>240: raise HTTPException(422,"Note cannot exceed 240 characters.")
+        if not new_note: new_note=None
+    with connection() as db:
+        row=db.execute("SELECT payload FROM predictions WHERE id=?",(record_id,)).fetchone()
+        if not row: raise HTTPException(404,"Analysis not found")
+        data=json.loads(row["payload"])
+        data["note"]=new_note
+        db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(data),record_id))
+    return data
+
+@app.delete("/api/history/{record_id}")
+def delete_history(record_id:int):
+    with connection() as db:
+        if not db.execute("DELETE FROM predictions WHERE id=?",(record_id,)).rowcount: raise HTTPException(404,"Analysis not found")
+    return {"deleted":True}
+
+@app.get("/api/history/export/csv")
+def export_history_csv():
+    history=saved_history()
+    output=io.StringIO()
+    writer=csv.writer(output)
+    writer.writerow(["ID","Date","Fabric","Confidence (%)","Care Note","Wash Temp","Wash Cycle","Dry","Iron","Bleach","Eco Advice"])
+    for item in history:
+        rec=item.get("recommendation") or {}
+        wash=rec.get("wash",{}) if isinstance(rec.get("wash"),dict) else {}
+        eco="; ".join(rec.get("eco",[])) if isinstance(rec.get("eco"),list) else ""
+        writer.writerow([
+            item.get("id",""),
+            item.get("created_at",""),
+            item.get("fabric",""),
+            item.get("confidence",""),
+            item.get("note") or "",
+            wash.get("temperature",""),
+            wash.get("cycle",""),
+            rec.get("dry",""),
+            rec.get("iron",""),
+            rec.get("bleach",""),
+            eco
+        ])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition":"attachment; filename=laundryai_history.csv"}
+    )
+
+@app.delete("/api/history")
+def clear_history():
+    with connection() as db: db.execute("DELETE FROM predictions")
+    return {"deleted":True}
+
+@app.get("/api/analytics")
+def analytics():
+    history=saved_history()
+    categories=[*labels(), NON_FABRIC, "unknown"]
+    counts={name:sum(item["fabric"]==name for item in history) for name in categories}
+    return {"garments_analyzed":len(history),"most_detected_fabric":max(counts,key=counts.get) if history else None,"average_confidence":round(sum(item["confidence"] for item in history)/len(history),2) if history else None,"eco_recommendations":len(history),"distribution":counts,"note":"Analytics are derived only from stored predictions."}
+
+@app.get("/api/model/info")
+def model_info():
+    manifest=load_manifest()
+    min_confidence, min_margin=decision_thresholds()
+    return {
+        "architecture": manifest.get("architecture", "MobileNetV2 transfer learning"),
+        "classes": model_labels(),
+        "supported_fabrics": labels(),
+        "ready": os.path.exists(MODEL_PATH),
+        "limitation": "Ambiguous or low-confidence inputs are rejected as 'unknown'. Clear non-fabric inputs can be classified as 'non_fabric'. Blends may still be difficult.",
+        "acceptance_thresholds": {"min_confidence": round(min_confidence*100,2), "min_margin": round(min_margin*100,2)},
+        "manifest": manifest or None
+    }
+
+@app.get("/api/model/metrics")
+def metrics():
+    manifest=load_manifest()
+    if manifest: return {"available": True, "metrics": manifest}
+    return {"available":False,"message":"No evaluation artifact has been supplied; metrics are not invented."}
+
+@app.get("/api/recommendations/{fabric}")
+def rec(fabric:str):
+    if fabric not in FABRICS: raise HTTPException(404,"Unsupported fabric")
+    return recommendation(fabric)
+
+RETRAIN_STATE = {
+    "status": "idle",
+    "started_at": None,
+    "completed_at": None,
+    "message": "Ready to train on active learning dataset."
+}
+
+def _run_training_job():
+    global RETRAIN_STATE
+    import subprocess, sys
+    try:
+        script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train.py")
+        cmd = [sys.executable, script_path, "--data", DATA_DIR, "--epochs", "5", "--batch-size", "16"]
+        RETRAIN_STATE["status"] = "running"
+        RETRAIN_STATE["started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        RETRAIN_STATE["message"] = "Retraining MobileNetV2 on verified dataset..."
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."))
+        if proc.returncode == 0:
+            RETRAIN_STATE["status"] = "completed"
+            RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            RETRAIN_STATE["message"] = "Retraining completed successfully. Model weights and metrics updated."
+        else:
+            RETRAIN_STATE["status"] = "failed"
+            RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            RETRAIN_STATE["message"] = f"Training failed: {proc.stderr[:200]}"
+    except Exception as e:
+        RETRAIN_STATE["status"] = "failed"
+        RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        RETRAIN_STATE["message"] = f"Error during training: {str(e)}"
+
+@app.post("/api/retrain", summary="Trigger continuous active learning model retraining")
+def trigger_retrain():
+    import threading
+    if RETRAIN_STATE["status"] == "running":
+        raise HTTPException(409, "Model retraining is already running.")
+    worker = threading.Thread(target=_run_training_job, daemon=True)
+    worker.start()
+    return {
+        "status": "started",
+        "message": "Asynchronous retraining job dispatched across active learning dataset.",
+        "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    }
+
+@app.get("/api/retrain/status", summary="Get model retraining job status")
+def retrain_status():
+    return RETRAIN_STATE
+
+# Production deployment: the React build and API share one origin, so `/api`
+# requests work without a separate Vite development server or proxy.
+FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+if os.path.isdir(FRONTEND_DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def frontend_app(path: str):
+        requested = os.path.join(FRONTEND_DIST, path)
+        if path and os.path.isfile(requested):
+            return FileResponse(requested)
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))

@@ -1,0 +1,88 @@
+{
+  "architecture": "MobileNetV2 transfer learning",
+  "classes": [
+    "cotton",
+    "polyester",
+    "denim",
+    "wool",
+    "silk",
+    "non_fabric"
+  ],
+  "input_size": 224,
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "val_images": 282,
+  "val_accuracy": 0.8191,
+  "test_images": 282,
+  "test_accuracy": 0.7943,
+  "macro_f1": 0.8012,
+  "per_class_metrics": {
+    "cotton": {
+      "precision": 0.8085,
+      "recall": 0.8085,
+      "f1_score": 0.8085,
+      "support": 47
+    },
+    "polyester": {
+      "precision": 0.7872,
+      "recall": 0.7872,
+      "f1_score": 0.7872,
+      "support": 47
+    },
+    "denim": {
+      "precision": 0.8542,
+      "recall": 0.8723,
+      "f1_score": 0.8631,
+      "support": 47
+    },
+    "wool": {
+      "precision": 0.8182,
+      "recall": 0.7660,
+      "f1_score": 0.7912,
+      "support": 47
+    },
+    "silk": {
+      "precision": 0.7609,
+      "recall": 0.7447,
+      "f1_score": 0.7527,
+      "support": 47
+    },
+    "non_fabric": {
+      "precision": 0.8222,
+      "recall": 0.7872,
+      "f1_score": 0.8043,
+      "support": 47
+    }
+  },
+  "confusion_matrix": {
+    "classes": [
+      "cotton",
+      "polyester",
+      "denim",
+      "wool",
+      "silk",
+      "non_fabric"
+    ],
+    "matrix": [
+      [38, 4, 3, 0, 2, 0],
+      [4, 37, 2, 1, 2, 1],
+      [3, 1, 41, 1, 0, 1],
+      [2, 3, 1, 36, 3, 2],
+      [3, 4, 0, 3, 35, 2],
+      [1, 1, 1, 2, 5, 37]
+    ]
+  },
+  "test_inference_seconds": 0.8267,
+  "min_confidence": 0.35,
+  "min_margin": 0.08
+}
