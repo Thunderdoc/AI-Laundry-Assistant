@@ -2,7 +2,7 @@
 
 ## Current system status
 
-The application is split into a React/Vite frontend on Vercel and a FastAPI model API on Render. Firebase Authentication provides email/password and Google sign-in. The backend can use Firebase Realtime Database as the canonical prediction/feedback store and Firebase Storage for private images. It verifies Firebase ID tokens, scopes history by Firebase UID, and grants administrator access only to verified emails in the server-side `ADMIN_EMAILS` allowlist. SQLite and local image folders remain a development/test fallback.
+The application is split into a React/Vite frontend on Vercel and a FastAPI model API on Render. Firebase Authentication provides verified email/password and Google sign-in. The backend can use Firebase Realtime Database as the canonical prediction/feedback store and Firebase Storage for private images. It verifies Firebase ID tokens, scopes history by Firebase UID, and grants administrator access through verified custom claims or the server-side `ADMIN_EMAILS` bootstrap allowlist. The admin console can grant/revoke roles and enable/disable users. SQLite and local image folders remain a development/test fallback.
 
 The repository contains a tracked TorchScript model and manifest. Runtime health performs a real CPU load and sample forward pass. The tracked deployment manifest reports 76.24% test accuracy on 282 images. Treat this as an artifact-declared result until the original split and evaluation are independently reproduced; the next candidate must also report macro F1 and stronger per-class/OOD evaluation.
 
@@ -14,10 +14,11 @@ The repository contains a tracked TorchScript model and manifest. Runtime health
 4. The user confirms or corrects the result.
 5. The image is copied to `review_pending/<label>` and is not used for training yet.
 6. A verified administrator reviews the queue and approves or rejects each item.
-7. Approved images move to `train/<label>`.
-8. Retraining can run only when `ENABLE_RETRAINING=true` and train/validation/test folders exist.
-9. While a job is running, the admin UI polls status every five seconds; polling stops automatically when the job finishes or the page unmounts.
-10. Training exports a candidate model. It never replaces the live model automatically. A candidate is promoted only after its held-out metrics, confusion matrix, class balance, latency, and regression checks pass.
+7. Approved images move to Firebase Storage under `training-approved/<label>`.
+8. `export_approved_feedback.py` downloads approved images into an offline `data/train/<label>` dataset.
+9. Retraining can run only when `ENABLE_RETRAINING=true` and train/validation/test folders exist.
+10. While a job is running, the admin UI polls status every five seconds; polling stops automatically when the job finishes or the page unmounts.
+11. Training exports a versioned candidate manifest with dataset counts and a fingerprint. It never replaces the live model automatically.
 
 This loop protects the dataset from incorrect labels and prevents a weak candidate from silently replacing production inference.
 
@@ -71,7 +72,7 @@ The admin console should provide only operational powers:
 - Start an offline training job and monitor status.
 - Compare candidate and production metrics.
 - Promote or roll back a model through an audited release action.
-- Disable abusive accounts through a protected backend action if later implemented.
+- Grant or revoke administrator claims and disable abusive accounts through protected backend actions.
 
 Admin identity must always be decided by verified backend claims or an allowlist after token verification. A frontend email comparison alone is not authorization.
 
@@ -120,11 +121,11 @@ Admin identity must always be decided by verified backend claims or an allowlist
 ## UI/UX and feature roadmap
 
 - Split the current JavaScript bundle by route to remove the >500 kB build warning.
-- Add skeleton states for Render cold starts and a clear backend-waking message.
+- Add richer skeleton states; Render cold-start preflight and a clear backend-waking message are implemented.
 - Add upload progress, crop/rotate, camera capture, image-quality hints, and retry handling.
-- Add accessible focus states, keyboard navigation, screen-reader labels, sufficient contrast, and reduced-motion support.
+- Continue the accessibility audit; reduced-motion support and labelled mobile navigation are implemented.
 - Keep animation purposeful: short page fades, upload progress, result reveal, and chart transitions; disable them under `prefers-reduced-motion`.
-- Improve mobile navigation with a compact menu and thumb-friendly controls.
+- Continue device testing; compact mobile navigation and responsive admin controls are implemented.
 - Add scan comparison, favorites, care reminders, downloadable care cards, and multilingual guidance.
 - Add a transparent privacy/consent control before an image can enter the training-review queue.
 

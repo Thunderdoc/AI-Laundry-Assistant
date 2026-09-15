@@ -1,7 +1,8 @@
 """Train and export a robust fabric-vs-non-fabric model from ImageFolder data.
 Expected layout: data/{train,val,test}/{cotton,polyester,denim,wool,silk,non_fabric}/image.jpg
 """
-import argparse, copy, json, random, time
+import argparse, copy, hashlib, json, random, time
+from datetime import datetime, timezone
 from pathlib import Path
 import torch
 from torch import nn
@@ -61,6 +62,19 @@ def remap(ds):
 train_ds=remap(datasets.ImageFolder(required[0], train_tf))
 val_ds=remap(datasets.ImageFolder(required[1], eval_tf))
 test_ds=remap(datasets.ImageFolder(required[2], eval_tf))
+
+def split_counts(dataset):
+    counts={name:0 for name in ORDER}
+    for _, target in dataset.samples: counts[ORDER[target]]+=1
+    return counts
+
+def dataset_fingerprint():
+    digest=hashlib.sha256()
+    for split in required:
+        for path in sorted(p for p in split.rglob("*") if p.is_file()):
+            stat=path.stat()
+            digest.update(f"{path.relative_to(root)}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()
 
 pin=torch.cuda.is_available()
 train_loader=DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=pin)
@@ -199,6 +213,9 @@ out=Path(args.output)
 out.parent.mkdir(parents=True,exist_ok=True)
 torch.jit.script(model.cpu()).save(str(out))
 manifest={
+    "model_version":datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"),
+    "artifact_status":"candidate",
+    "trained_at":datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
     "architecture":"MobileNetV2 transfer learning",
     "classes":train_ds.classes,
     "input_size":INPUT_SIZE,
@@ -208,6 +225,12 @@ manifest={
     "test_images":test_n,
     "test_accuracy":round(test_good/max(1,test_n), 4),
     "macro_f1":macro_f1,
+    "dataset":{
+        "fingerprint":dataset_fingerprint(),
+        "train_counts":split_counts(train_ds),
+        "validation_counts":split_counts(val_ds),
+        "test_counts":split_counts(test_ds),
+    },
     "per_class_metrics":per_class_metrics,
     "confusion_matrix":{
         "classes":ORDER,
@@ -219,4 +242,3 @@ manifest={
 }
 out.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2))
 print(json.dumps(manifest, indent=2))
-

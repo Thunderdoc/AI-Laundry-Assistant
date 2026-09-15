@@ -88,6 +88,16 @@ training-approved/{fabric}/{filename}.jpg
 
 Admin image previews are returned by a protected API endpoint. The browser never receives a public Storage URL.
 
+## Offline training export
+
+After an administrator approves feedback, download it on the trusted training computer:
+
+```text
+python backend/scripts/export_approved_feedback.py --output data/train
+```
+
+Then review class counts, create source-separated validation/test splits, and run `backend/scripts/train.py`. Training emits a candidate artifact and manifest; it does not replace the deployed model automatically.
+
 ## Rollback
 
 If Firebase Database or Storage is not ready, set:

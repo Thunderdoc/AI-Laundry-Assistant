@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
+import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
 import "./style.css";
 
@@ -40,6 +40,7 @@ function AuthGate() {
   const [password, setPassword] = useState("");
   const [isRegistering, setIsRegistering] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
+  const [verificationPending, setVerificationPending] = useState(false);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -68,6 +69,15 @@ function AuthGate() {
             setUser(null);
             return;
           }
+          const passwordAccount=firebaseUser.providerData.some((provider) => provider.providerId === "password");
+          if (passwordAccount && !firebaseUser.emailVerified) {
+            localStorage.removeItem("laundryai_firebase_token");
+            setVerificationPending(true);
+            setAuthNotice("Verify your email, then sign in again to continue.");
+            setUser(null);
+            return;
+          }
+          setVerificationPending(false);
           try {
             const idToken = await firebaseUser.getIdToken();
             if (firebaseConfig.databaseURL) {
@@ -128,7 +138,12 @@ function AuthGate() {
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
       const auth = getAuth(app);
-      if (isRegistering) await createUserWithEmailAndPassword(auth, email.trim(), password);
+      if (isRegistering) {
+        const credential=await createUserWithEmailAndPassword(auth, email.trim(), password);
+        await sendEmailVerification(credential.user);
+        setVerificationPending(true);
+        setAuthNotice("Verification email sent. Open the link, then sign in again.");
+      }
       else await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Email sign-in failed.");
@@ -151,6 +166,20 @@ function AuthGate() {
       setAuthNotice("Password-reset email sent. Check your inbox and spam folder.");
     } catch (error) {
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Could not send the password-reset email.");
+    }
+  };
+
+  const handleResendVerification = async () => {
+    const current=getApps().length ? getAuth(getApp()).currentUser : null;
+    if (!current) {
+      setAuthNotice("Sign in with your email and password first, then resend verification.");
+      return;
+    }
+    try {
+      await sendEmailVerification(current);
+      setAuthNotice("A new verification email was sent. Check inbox and spam.");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Could not resend verification.");
     }
   };
 
@@ -182,6 +211,7 @@ function AuthGate() {
             </form>
             {settings.enabled ? <>
               <button className="auth-switch" type="button" onClick={() => setIsRegistering((value) => !value)}>{isRegistering ? "Already have an account? Sign in" : "New here? Create an account"}</button>
+              {verificationPending && <button className="auth-switch verification-link" type="button" onClick={handleResendVerification}>Resend verification email</button>}
               <div className="auth-divider"><span>or</span></div>
               <button className="google-login" onClick={handleGoogleLogin} disabled={isSigningIn}>
                 <span className="google-g">G</span>Continue with Google
@@ -261,6 +291,19 @@ type AdminFeedbackItem = {
   filename?: string;
   original_fabric?: string;
   created_at?: string;
+};
+
+type AdminUser = {
+  uid: string;
+  email?: string;
+  name?: string;
+  picture?: string;
+  email_verified: boolean;
+  disabled: boolean;
+  is_admin: boolean;
+  providers: string[];
+  created_at?: number;
+  last_sign_in_at?: number;
 };
 
 function AdminFeedbackPreview({ item }: { item: AdminFeedbackItem }) {
@@ -601,6 +644,7 @@ const LITERATURE_PAPERS = [
 
 function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise<void> }) {
   const [page, setPage] = useState<Page>("home");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [file, setFile] = useState<File | undefined>();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -619,6 +663,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [modelMetrics, setModelMetrics] = useState<any>(null);
   const [adminOverview, setAdminOverview] = useState<any>(null);
   const [adminFeedback, setAdminFeedback] = useState<AdminFeedbackItem[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminMessage, setAdminMessage] = useState("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
   const [compareActive, setCompareActive] = useState(false);
@@ -672,13 +717,15 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     if (!user.is_admin) return;
     let timer: number | undefined;
     const refreshAdminOverview = async () => {
-      const [overviewResponse, feedbackResponse] = await Promise.all([
+      const [overviewResponse, feedbackResponse, usersResponse] = await Promise.all([
         apiFetch(`${API}/admin/overview`),
         apiFetch(`${API}/admin/feedback`),
+        apiFetch(`${API}/admin/users`),
       ]);
       if (!overviewResponse.ok) throw new Error("Admin service is unavailable.");
       setAdminOverview(await overviewResponse.json());
       if (feedbackResponse.ok) setAdminFeedback((await feedbackResponse.json()).items || []);
+      if (usersResponse.ok) setAdminUsers((await usersResponse.json()).users || []);
     };
     void refreshAdminOverview().catch(() => setAdminMessage("Connect the secure backend to load live admin statistics."));
     // Conditional loop: it polls only while the model-training job is active.
@@ -886,6 +933,16 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     }
 
     try {
+      // Render's free service may sleep. Wake it before sending the non-idempotent
+      // prediction request so a retry can never create duplicate history records.
+      setStatus("Connecting to the AI service…");
+      let health = await fetch(`${API}/health`).catch(() => null);
+      if (!health?.ok) {
+        setStatus("Waking the AI service. This can take up to a minute…");
+        await new Promise((resolve) => setTimeout(resolve, 3500));
+        health = await fetch(`${API}/health`).catch(() => null);
+      }
+      if (!health?.ok) throw new Error("The AI service is still waking up. Please try again in a few seconds.");
       const response = await apiFetch(`${API}/predict`, { method: "POST", body: form });
       const data = (await response.json()) as Prediction;
       if (!response.ok) {
@@ -1025,7 +1082,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const nav = (target: Page, label: string) => (
     <button
       className={`nav-link ${page === target ? "active" : ""}`}
-      onClick={() => setPage(target)}
+      onClick={() => { setPage(target); setMobileNavOpen(false); }}
       aria-current={page === target ? "page" : undefined}
       type="button"
     >
@@ -1045,7 +1102,11 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           </div>
         </button>
 
-        <nav className="main-nav">
+        <button className="mobile-menu" type="button" aria-label="Toggle navigation" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen((open) => !open)}>
+          <span /><span /><span />
+        </button>
+
+        <nav className={`main-nav ${mobileNavOpen ? "open" : ""}`}>
           {nav("home", "Home")}
           {nav("analyze", "Analyze")}
           {nav("history", "History")}
@@ -2719,6 +2780,43 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
                 </div>
               </article>
             )) : <p className="admin-empty">No feedback is waiting for review.</p>}
+          </section>
+
+          <section className="admin-review-queue admin-users">
+            <div className="admin-section-heading">
+              <div><span className="eyebrow">ACCESS CONTROL</span><h2>Users and administrator roles</h2></div>
+              <span className="admin-count">{adminUsers.length} users</span>
+            </div>
+            <p className="admin-section-copy">Grant only trusted accounts administrator access. Role changes take effect after the user signs out and signs in again.</p>
+            {adminUsers.length ? adminUsers.map((account) => (
+              <article className="admin-user-row" key={account.uid}>
+                <div className="admin-user-avatar">{account.picture ? <img src={account.picture} alt="" referrerPolicy="no-referrer" /> : (account.email || "?").charAt(0).toUpperCase()}</div>
+                <div className="admin-review-copy">
+                  <strong>{account.name || account.email || "Unnamed user"}</strong>
+                  <small>{account.email || account.uid}</small>
+                  <div className="admin-badges">
+                    <span className={account.email_verified ? "ok" : "warn"}>{account.email_verified ? "Verified" : "Unverified"}</span>
+                    {account.is_admin && <span className="admin-badge">Admin</span>}
+                    {account.disabled && <span className="danger">Disabled</span>}
+                  </div>
+                </div>
+                <div className="admin-row-actions">
+                  <button type="button" className="btn btn-outline" disabled={account.uid === user.uid && account.is_admin} onClick={async () => {
+                    const next=!account.is_admin;
+                    const response=await apiFetch(`${API}/admin/users/${encodeURIComponent(account.uid)}/role`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({is_admin:next})});
+                    if (response.ok) setAdminUsers((items) => items.map((item) => item.uid === account.uid ? {...item,is_admin:next} : item));
+                    else setAdminMessage((await response.json()).detail || "Could not update this role.");
+                  }}>{account.is_admin ? "Remove admin" : "Make admin"}</button>
+                  <button type="button" className={`btn ${account.disabled ? "btn-primary" : "btn-outline"}`} disabled={account.uid === user.uid} onClick={async () => {
+                    const next=!account.disabled;
+                    if (next && !window.confirm(`Disable ${account.email || "this user"}?`)) return;
+                    const response=await apiFetch(`${API}/admin/users/${encodeURIComponent(account.uid)}/status`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({disabled:next})});
+                    if (response.ok) setAdminUsers((items) => items.map((item) => item.uid === account.uid ? {...item,disabled:next} : item));
+                    else setAdminMessage((await response.json()).detail || "Could not update this account.");
+                  }}>{account.disabled ? "Enable user" : "Disable user"}</button>
+                </div>
+              </article>
+            )) : <p className="admin-empty">No Firebase users could be loaded.</p>}
           </section>
         </main>
       )}

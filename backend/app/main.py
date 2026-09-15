@@ -29,6 +29,12 @@ ADMIN_EMAILS = {email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "")
 class FirebaseCredential(BaseModel):
     id_token: str
 
+class AdminRoleUpdate(BaseModel):
+    is_admin: bool
+
+class UserStatusUpdate(BaseModel):
+    disabled: bool
+
 def firebase_auth_enabled() -> bool:
     """Require login only after both the browser config and server credential exist."""
     has_web_config = all(FIREBASE_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId"))
@@ -44,12 +50,7 @@ def verify_firebase_token(id_token: str):
     if account_file and not os.path.isfile(account_file):
         raise HTTPException(503, "Firebase service-account file was not found on the server.")
     try:
-        import firebase_admin
-        from firebase_admin import auth, credentials
-        if not firebase_admin._apps:
-            service_account = json.loads(account_json) if account_json else account_file
-            firebase_admin.initialize_app(credentials.Certificate(service_account))
-        return auth.verify_id_token(id_token, check_revoked=True)
+        return firebase_admin_auth_client().verify_id_token(id_token, check_revoked=True)
     except HTTPException:
         raise
     except Exception as exc:
@@ -59,7 +60,7 @@ def is_admin(user: dict | None) -> bool:
     return bool(
         user
         and user.get("email_verified") is True
-        and (user.get("email") or "").strip().lower() in ADMIN_EMAILS
+        and (user.get("admin") is True or (user.get("email") or "").strip().lower() in ADMIN_EMAILS)
     )
 
 def require_admin(request: Request) -> dict:
@@ -69,6 +70,16 @@ def require_admin(request: Request) -> dict:
     if not is_admin(user):
         raise HTTPException(403, "Administrator access is required.")
     return user
+
+def firebase_admin_auth_client():
+    account_file = os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE", "").strip()
+    account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+    import firebase_admin
+    from firebase_admin import auth, credentials
+    if not firebase_admin._apps:
+        service_account = json.loads(account_json) if account_json else account_file
+        firebase_admin.initialize_app(credentials.Certificate(service_account))
+    return auth
 
 @app.middleware("http")
 async def require_firebase_auth(request: Request, call_next):
@@ -559,6 +570,63 @@ def admin_overview(request: Request):
         "training_available": training_available(),
     }
 
+@app.get("/api/admin/users")
+def admin_users(request: Request):
+    require_admin(request)
+    try:
+        page=firebase_admin_auth_client().list_users(max_results=100)
+        users=[]
+        for account in page.users:
+            claims=account.custom_claims or {}
+            users.append({
+                "uid":account.uid,
+                "email":account.email,
+                "name":account.display_name,
+                "picture":account.photo_url,
+                "email_verified":account.email_verified,
+                "disabled":account.disabled,
+                "is_admin":claims.get("admin") is True or (account.email or "").lower() in ADMIN_EMAILS,
+                "providers":[provider.provider_id for provider in account.provider_data],
+                "created_at":account.user_metadata.creation_timestamp,
+                "last_sign_in_at":account.user_metadata.last_sign_in_timestamp,
+            })
+        return {"count":len(users),"users":users,"next_page":bool(page.next_page_token)}
+    except Exception as exc:
+        raise HTTPException(503,"Could not load Firebase users.") from exc
+
+@app.patch("/api/admin/users/{uid}/role")
+def update_admin_role(uid: str, payload: AdminRoleUpdate, request: Request):
+    admin=require_admin(request)
+    if uid == admin.get("uid") and not payload.is_admin:
+        raise HTTPException(409,"You cannot remove your own administrator access.")
+    try:
+        auth_client=firebase_admin_auth_client()
+        account=auth_client.get_user(uid)
+        claims=dict(account.custom_claims or {})
+        if payload.is_admin: claims["admin"]=True
+        else: claims.pop("admin",None)
+        auth_client.set_custom_user_claims(uid,claims or None)
+        return {"updated":True,"uid":uid,"is_admin":payload.is_admin,"message":"The user must refresh their sign-in token."}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503,"Could not update the administrator role.") from exc
+
+@app.patch("/api/admin/users/{uid}/status")
+def update_user_status(uid: str, payload: UserStatusUpdate, request: Request):
+    admin=require_admin(request)
+    if uid == admin.get("uid") and payload.disabled:
+        raise HTTPException(409,"You cannot disable your own account.")
+    try:
+        auth_client=firebase_admin_auth_client()
+        auth_client.update_user(uid,disabled=payload.disabled)
+        if payload.disabled: auth_client.revoke_refresh_tokens(uid)
+        return {"updated":True,"uid":uid,"disabled":payload.disabled}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503,"Could not update the user status.") from exc
+
 @app.get("/api/admin/feedback")
 def admin_feedback(request: Request):
     require_admin(request)
@@ -652,6 +720,28 @@ def metrics():
     manifest=load_manifest()
     if manifest: return {"available": True, "metrics": manifest}
     return {"available":False,"message":"No evaluation artifact has been supplied; metrics are not invented."}
+
+@app.get("/api/admin/model/governance")
+def model_governance(request: Request):
+    require_admin(request)
+    manifest=load_manifest()
+    dataset=dataset_stats()
+    counts={name:data.get("total",0) for name,data in dataset.get("classes",{}).items()}
+    largest=max(counts.values(),default=0)
+    warnings=[]
+    for name,count in counts.items():
+        if largest and count < largest * 0.35:
+            warnings.append(f"{name} has only {count} samples versus the largest class at {largest}.")
+    return {
+        "current_model":manifest or None,
+        "dataset":dataset,
+        "warnings":warnings,
+        "promotion_policy":{
+            "automatic_promotion":False,
+            "required_checks":["held-out test accuracy","macro F1","per-class recall","confusion matrix","manual smoke test"],
+            "rule":"A candidate remains separate until an administrator reviews its metrics and explicitly deploys it."
+        }
+    }
 
 @app.get("/api/recommendations/{fabric}")
 def rec(fabric:str):

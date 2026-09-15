@@ -266,6 +266,8 @@ class TestLaundryAIAPI(unittest.TestCase):
             self.assertTrue(is_admin({"email": "ADMIN@example.com", "email_verified": True}))
             self.assertFalse(is_admin({"email": "admin@example.com", "email_verified": False}))
             self.assertFalse(is_admin({"email": "user@example.com", "email_verified": True}))
+            self.assertTrue(is_admin({"email": "user@example.com", "email_verified": True, "admin": True}))
+            self.assertFalse(is_admin({"email": "user@example.com", "email_verified": False, "admin": True}))
         finally:
             main.ADMIN_EMAILS = original
 
