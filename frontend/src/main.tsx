@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
+import { getDatabase, onValue, ref, set } from "firebase/database";
 import "./style.css";
 
 // Local production uses the same origin. On Vercel set VITE_API_URL to the
@@ -18,6 +19,7 @@ const firebaseWebConfig = {
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "",
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
   appId: import.meta.env.VITE_FIREBASE_APP_ID || "",
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || "",
 };
 const firebaseWebConfigured = Boolean(firebaseWebConfig.apiKey && firebaseWebConfig.authDomain && firebaseWebConfig.projectId && firebaseWebConfig.appId);
 const backendAuthAvailable = Boolean(import.meta.env.VITE_API_URL) || ["localhost", "127.0.0.1"].includes(window.location.hostname);
@@ -50,7 +52,8 @@ function AuthGate() {
         }
         setSettings(config);
         if (!config.enabled || !config.firebase_config) return;
-        const app = getApps().length ? getApp() : initializeApp(config.firebase_config);
+        const firebaseConfig = config.firebase_config;
+        const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
         const auth = getAuth(app);
         unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
           if (!firebaseUser) {
@@ -60,6 +63,14 @@ function AuthGate() {
           }
           try {
             const idToken = await firebaseUser.getIdToken();
+            if (firebaseConfig.databaseURL) {
+              // Store only basic account metadata. Passwords and Google credentials are never stored here.
+              await set(ref(getDatabase(app), `users/${firebaseUser.uid}/profile`), {
+                email: firebaseUser.email || "",
+                name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
+                lastLoginAt: new Date().toISOString(),
+              });
+            }
             if (!backendAuthAvailable) {
               localStorage.setItem("laundryai_firebase_token", idToken);
               setUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user", picture: firebaseUser.photoURL });
@@ -616,6 +627,24 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   }, []);
 
   useEffect(() => {
+    if (user.guest || !firebaseWebConfig.databaseURL) return;
+    const app = getApps().length ? getApp() : initializeApp(firebaseWebConfig);
+    return onValue(ref(getDatabase(app), `users/${user.uid}/history`), (snapshot) => {
+      const stored = snapshot.val() as Record<string, Prediction> | null;
+      if (!stored) return;
+      setHistory(Object.values(stored).sort((a, b) => b.created_at.localeCompare(a.created_at)));
+    });
+  }, [user.guest, user.uid]);
+
+  const saveFirebaseHistory = async (prediction: Prediction) => {
+    if (user.guest || !firebaseWebConfig.databaseURL) return;
+    const app = getApps().length ? getApp() : initializeApp(firebaseWebConfig);
+    // Images and short-lived image tokens are deliberately excluded for privacy and storage cost.
+    const { image_token: _imageToken, ...safePrediction } = prediction;
+    await set(ref(getDatabase(app), `users/${user.uid}/history/${prediction.id}`), safePrediction);
+  };
+
+  useEffect(() => {
     if (stream && video.current) {
       video.current.srcObject = stream;
     }
@@ -819,6 +848,11 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         throw data;
       }
       setResult(data);
+      try {
+        await saveFirebaseHistory(data);
+      } catch {
+        // A prediction remains usable if an optional cloud-history write is unavailable.
+      }
       setStatus("Analysis complete.");
       setAnalysisStep(5);
       setNoteError("");
