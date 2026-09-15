@@ -10,7 +10,7 @@ import "./style.css";
 const API = import.meta.env.VITE_API_URL?.replace(/\/$/, "") || "/api";
 const NOTE_MAX_LENGTH = 240;
 
-type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean };
+type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean; is_admin?: boolean };
 type FirebaseSettings = { enabled: boolean; firebase_config: Record<string, string> | null };
 const firebaseWebConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -46,9 +46,16 @@ function AuthGate() {
     void (async () => {
       try {
         let config: FirebaseSettings = firebaseWebConfigured ? { enabled: true, firebase_config: firebaseWebConfig } : { enabled: false, firebase_config: null };
+        let verifyWithBackend = false;
         if (backendAuthAvailable) {
           const response = await fetch(`${API}/auth/config`);
-          if (response.ok) config = await response.json();
+          if (response.ok) {
+            const backendConfig = await response.json() as FirebaseSettings;
+            if (backendConfig.enabled && backendConfig.firebase_config) {
+              config = backendConfig;
+              verifyWithBackend = true;
+            }
+          }
         }
         setSettings(config);
         if (!config.enabled || !config.firebase_config) return;
@@ -71,7 +78,7 @@ function AuthGate() {
                 lastLoginAt: new Date().toISOString(),
               });
             }
-            if (!backendAuthAvailable) {
+            if (!verifyWithBackend) {
               localStorage.setItem("laundryai_firebase_token", idToken);
               setUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user", picture: firebaseUser.photoURL });
               return;
@@ -200,7 +207,7 @@ function AuthGate() {
   );
 }
 
-type Page = "home" | "analyze" | "history" | "insights" | "library" | "research" | "about";
+type Page = "home" | "analyze" | "history" | "insights" | "library" | "research" | "admin" | "about";
 
 type Recommendation = {
   wash: { temperature: string; cycle: string; detergent?: string; spin?: string };
@@ -578,6 +585,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [analytics, setAnalytics] = useState<Analytics | undefined>();
   const [datasetStats, setDatasetStats] = useState<DatasetStats | undefined>();
   const [modelMetrics, setModelMetrics] = useState<any>(null);
+  const [adminOverview, setAdminOverview] = useState<any>(null);
+  const [adminFeedback, setAdminFeedback] = useState<Array<{ fabric: string; file: string }>>([]);
+  const [adminMessage, setAdminMessage] = useState("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
   const [compareActive, setCompareActive] = useState(false);
   const [researchTab, setResearchTab] = useState<string>("problem");
@@ -625,6 +635,26 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (!user.is_admin) return;
+    let timer: number | undefined;
+    const refreshAdminOverview = async () => {
+      const [overviewResponse, feedbackResponse] = await Promise.all([
+        apiFetch(`${API}/admin/overview`),
+        apiFetch(`${API}/admin/feedback`),
+      ]);
+      if (!overviewResponse.ok) throw new Error("Admin service is unavailable.");
+      setAdminOverview(await overviewResponse.json());
+      if (feedbackResponse.ok) setAdminFeedback((await feedbackResponse.json()).items || []);
+    };
+    void refreshAdminOverview().catch(() => setAdminMessage("Connect the secure backend to load live admin statistics."));
+    // Conditional loop: it polls only while the model-training job is active.
+    if (adminOverview?.retraining?.status === "running") {
+      timer = window.setInterval(() => void refreshAdminOverview().catch(() => undefined), 5000);
+    }
+    return () => { if (timer) window.clearInterval(timer); };
+  }, [user.is_admin, adminOverview?.retraining?.status]);
 
   useEffect(() => {
     if (user.guest || !firebaseWebConfig.databaseURL) return;
@@ -885,7 +915,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       const data = await response.json();
       setFeedbackSubmitted(true);
       setIsSelectingCorrection(false);
-      setFeedbackMessage(data.message || `Saved to ${confirmedFabric.toUpperCase()} training data.`);
+      setFeedbackMessage(data.message || `Submitted ${confirmedFabric.toUpperCase()} for administrator review.`);
       await load();
     } catch {
       alert("Failed to submit feedback. Please try again.");
@@ -1013,6 +1043,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           {nav("insights", "Insights")}
           {nav("library", "Fabric Library")}
           {nav("research", "Research")}
+          {user.is_admin && nav("admin", "Admin")}
           {nav("about", "About")}
         </nav>
 
@@ -1556,7 +1587,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       <span>🎯 Active Learning Feedback & Continuous Dataset Training</span>
                     </div>
                     <p className="feedback-desc">
-                      Help LaundryAI learn! Confirm if this garment was identified correctly to automatically store this image in the training dataset for future model retraining.
+                      Help LaundryAI learn. Your correction enters a private review queue; an administrator checks the label before it can become training data.
                     </p>
 
                     {feedbackSubmitted ? (
@@ -1577,7 +1608,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                                 className="feedback-correct-btn"
                                 onClick={() => submitFeedback(result.model_decision?.top_fabric || result.fabric, true)}
                               >
-                                ✓ Yes, it's {result.fabric.toUpperCase()} (Save to Training Data)
+                                ✓ Yes, it's {result.fabric.toUpperCase()} (Submit for Review)
                               </button>
                               <button
                                 type="button"
@@ -1591,7 +1622,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                         ) : (
                           <div className="feedback-picker">
                             <p style={{ fontSize: "13.5px", fontWeight: 700, color: "var(--dark)", marginBottom: "8px" }}>
-                              Select the actual fabric type to store this image in its correct training folder:
+                              Select the actual fabric type to submit this image for administrator review:
                             </p>
                             <div className="tag-container">
                               {[
@@ -2599,6 +2630,82 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
               )}
             </div>
           </div>
+        </main>
+      )}
+
+      {page === "admin" && user.is_admin && (
+        <main className="page-container admin-page">
+          <section className="admin-hero">
+            <div>
+              <span className="eyebrow">ADMIN CONSOLE</span>
+              <h1>Model operations, in one place.</h1>
+              <p>Review live model readiness, scan activity, dataset growth, and retraining status. Retraining should follow reviewed user feedback.</p>
+            </div>
+            <div className="admin-identity"><span>ADMIN</span><strong>{user.email}</strong></div>
+          </section>
+
+          {adminMessage && <div className="admin-alert">{adminMessage}</div>}
+
+          <section className="admin-stats-grid">
+            <div><span>Total scans</span><b>{adminOverview?.total_scans ?? history.length}</b><small>Recorded analyses</small></div>
+            <div><span>Feedback records</span><b>{adminOverview?.feedback_records ?? 0}</b><small>Awaiting review or included data</small></div>
+            <div><span>Dataset samples</span><b>{adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b><small>Across supported classes</small></div>
+            <div><span>Model status</span><b>{adminOverview?.model_ready ? "Ready" : "Checking"}</b><small>Live inference availability</small></div>
+          </section>
+
+          <section className="admin-workspace">
+            <div>
+              <span className="eyebrow">ACTIVE LEARNING</span>
+              <h2>Retraining control</h2>
+              <p>Only retrain after checking corrected labels. The system keeps the existing model until a replacement has been trained and evaluated.</p>
+              <button className="btn btn-primary" type="button" onClick={async () => {
+                if (!window.confirm("Start model retraining from reviewed feedback?")) return;
+                setAdminMessage("Starting retraining…");
+                try {
+                  const response = await apiFetch(`${API}/retrain`, { method: "POST" });
+                  const data = await response.json();
+                  if (!response.ok) throw new Error(data.detail || "Could not start retraining.");
+                  setAdminMessage(data.message || "Retraining started.");
+                  setAdminOverview((current: any) => ({ ...current, retraining: { status: "running", message: data.message } }));
+                } catch (error) {
+                  setAdminMessage(error instanceof Error ? error.message : "Could not start retraining.");
+                }
+              }}>Start reviewed retraining</button>
+              {adminOverview?.retraining?.status === "running" && <p className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</p>}
+            </div>
+            <div className="admin-checklist">
+              <h3>Before deployment</h3>
+              <p>✓ Check corrected fabric labels</p>
+              <p>✓ Compare accuracy, precision, recall, and F1</p>
+              <p>✓ Keep the current model if validation does not improve</p>
+              <p>✓ Document the new model version</p>
+            </div>
+          </section>
+
+          <section className="admin-review-queue">
+            <div className="admin-section-heading">
+              <div><span className="eyebrow">HUMAN REVIEW</span><h2>Pending training feedback</h2></div>
+              <span className="admin-count">{adminFeedback.length} pending</span>
+            </div>
+            {adminFeedback.length ? adminFeedback.map((item) => (
+              <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
+                <div><strong>{item.fabric}</strong><small>{item.file}</small></div>
+                <div className="admin-row-actions">
+                  <button type="button" className="btn btn-primary" onClick={async () => {
+                    const response=await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`,{method:"POST"});
+                    if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
+                    else setAdminMessage("Could not approve this feedback item.");
+                  }}>Approve label</button>
+                  <button type="button" className="btn btn-outline" onClick={async () => {
+                    if (!window.confirm("Reject this feedback image?")) return;
+                    const response=await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}`,{method:"DELETE"});
+                    if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
+                    else setAdminMessage("Could not reject this feedback item.");
+                  }}>Reject</button>
+                </div>
+              </article>
+            )) : <p className="admin-empty">No feedback is waiting for review.</p>}
+          </section>
         </main>
       )}
 

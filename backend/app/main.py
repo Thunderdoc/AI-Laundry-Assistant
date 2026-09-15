@@ -23,6 +23,7 @@ FIREBASE_CONFIG = {
     "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID", ""),
     "appId": os.getenv("FIREBASE_APP_ID", ""),
 }
+ADMIN_EMAILS = {email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "").split(",") if email.strip()}
 
 class FirebaseCredential(BaseModel):
     id_token: str
@@ -53,11 +54,26 @@ def verify_firebase_token(id_token: str):
     except Exception as exc:
         raise HTTPException(401, "Google sign-in could not be verified.") from exc
 
+def is_admin(user: dict | None) -> bool:
+    return bool(
+        user
+        and user.get("email_verified") is True
+        and (user.get("email") or "").strip().lower() in ADMIN_EMAILS
+    )
+
+def require_admin(request: Request) -> dict:
+    if not firebase_auth_enabled():
+        raise HTTPException(503, "Secure admin access requires Firebase server credentials.")
+    user = getattr(request.state, "user", None)
+    if not is_admin(user):
+        raise HTTPException(403, "Administrator access is required.")
+    return user
+
 @app.middleware("http")
 async def require_firebase_auth(request: Request, call_next):
     path = request.url.path
     public_api = {"/api/health", "/api/auth/config", "/api/auth/firebase"}
-    if firebase_auth_enabled() and path.startswith("/api/") and path not in public_api:
+    if request.method != "OPTIONS" and firebase_auth_enabled() and path.startswith("/api/") and path not in public_api:
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return Response(status_code=401, content='{"detail":"Sign in is required."}', media_type="application/json")
@@ -79,16 +95,76 @@ def connection():
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     try:
-        db.execute("CREATE TABLE IF NOT EXISTS predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, fabric TEXT NOT NULL, confidence REAL NOT NULL, payload TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_uid TEXT NOT NULL DEFAULT 'local-preview', created_at TEXT NOT NULL, fabric TEXT NOT NULL, confidence REAL NOT NULL, payload TEXT NOT NULL)")
+        columns={row[1] for row in db.execute("PRAGMA table_info(predictions)")}
+        if "owner_uid" not in columns:
+            db.execute("ALTER TABLE predictions ADD COLUMN owner_uid TEXT NOT NULL DEFAULT 'local-preview'")
         yield db
         db.commit()
     finally:
         db.close()
 
-def saved_history():
-    with connection() as db: return [json.loads(row["payload"]) for row in db.execute("SELECT payload FROM predictions ORDER BY id DESC")]
+def request_uid(request: Request) -> str:
+    user = getattr(request.state, "user", None)
+    return str(user.get("uid")) if user and user.get("uid") else "local-preview"
 
-MODEL_PATH=os.path.abspath(os.getenv("MODEL_PATH", os.path.join(os.path.dirname(__file__), "..", "models", "fabric_mobilenetv2.pt")))
+def saved_history(owner_uid: str | None = None):
+    with connection() as db:
+        if owner_uid is None:
+            rows=db.execute("SELECT payload FROM predictions ORDER BY id DESC")
+        else:
+            rows=db.execute("SELECT payload FROM predictions WHERE owner_uid=? ORDER BY id DESC",(owner_uid,))
+        return [json.loads(row["payload"]) for row in rows]
+
+_default_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "fabric_mobilenetv2.pt"))
+_bundled_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "models", "fabric_mobilenetv2.pt"))
+# Development keeps the model under models/. The repository also bundles a tracked
+# deploy copy under backend/models/ so cloud hosts receive the weights.
+def resolve_model_path() -> str:
+    configured = os.getenv("MODEL_PATH", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(os.path.abspath(configured))
+        # Render runs this service with backend/ as its root directory. Accept a
+        # repository-relative value as well, so either models/... or
+        # backend/models/... works without silently disabling inference.
+        candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", configured)))
+    candidates.extend((_default_model_path, _bundled_model_path))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return candidates[0] if candidates else _bundled_model_path
+
+MODEL_PATH=resolve_model_path()
+_MODEL = None
+_MODEL_ERROR = None
+
+def load_model():
+    global _MODEL, _MODEL_ERROR
+    if _MODEL is not None: return _MODEL
+    if not os.path.isfile(MODEL_PATH):
+        _MODEL_ERROR = f"Model file not found at {MODEL_PATH}"
+        raise RuntimeError(_MODEL_ERROR)
+    try:
+        import torch
+        torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
+        model=torch.jit.load(MODEL_PATH, map_location="cpu").eval()
+        input_size, _, _ = preprocess_config()
+        with torch.no_grad(): output=model(torch.zeros(1,3,input_size,input_size))
+        if output.ndim != 2 or output.shape[1] != len(model_labels()):
+            raise RuntimeError("Model output does not match the manifest classes.")
+        _MODEL, _MODEL_ERROR = model, None
+        return model
+    except Exception as exc:
+        _MODEL_ERROR = str(exc)
+        raise
+
+def model_status():
+    try:
+        load_model()
+        return {"ready": True, "error": None, "path": os.path.basename(MODEL_PATH)}
+    except Exception:
+        return {"ready": False, "error": _MODEL_ERROR or "Model validation failed.", "path": os.path.basename(MODEL_PATH)}
 
 def manifest_path(): return os.path.splitext(MODEL_PATH)[0] + ".manifest.json"
 
@@ -134,8 +210,13 @@ def preprocess_config():
     if not isinstance(std, list) or len(std)!=3: std=[0.229,0.224,0.225]
     return max(32, input_size), [float(x) for x in mean], [float(x) for x in std]
 
+@app.get("/")
+def root(): return {"service":"LaundryAI API", "health":"/api/health", "docs":"/docs"}
+
 @app.get("/api/health")
-def health(): return {"status":"ok", "model_ready":os.path.exists(MODEL_PATH)}
+def health():
+    state=model_status()
+    return {"status":"ok" if state["ready"] else "degraded", "model_ready":state["ready"], "model_error":state["error"]}
 
 @app.get("/api/auth/config")
 def firebase_auth_config():
@@ -150,6 +231,7 @@ def firebase_login(payload: FirebaseCredential):
         "email": user.get("email"),
         "name": user.get("name") or user.get("email", "LaundryAI user").split("@")[0],
         "picture": user.get("picture"),
+        "is_admin": is_admin(user),
     }
 
 @app.get("/api/fabrics")
@@ -161,7 +243,7 @@ def fabric(fabric:str):
     return {"id":fabric, **recommendation(fabric)}
 
 @app.post("/api/predict", summary="Predict fabric from an image")
-async def predict(image:UploadFile=File(...), note:Optional[str]=Form(None)):
+async def predict(request: Request, image:UploadFile=File(...), note:Optional[str]=Form(None)):
     if note is not None:
         note=note.strip()
         if len(note)>240:
@@ -187,11 +269,10 @@ async def predict(image:UploadFile=File(...), note:Optional[str]=Form(None)):
     sample=ImageStat.Stat(im.resize((64,64)))
     texture=round(sum(sample.stddev)/3,1)
     quality={"width":im.width,"height":im.height,"brightness":round(sum(sample.mean)/3,1),"texture":texture,"warning": im.width<224 or im.height<224}
-    if not os.path.exists(MODEL_PATH): raise HTTPException(503, "Trained model artifact not found. Install/export the real model before predicting.")
     names=model_labels(); preview=False
     try:
         import torch, numpy as np
-        model=torch.jit.load(MODEL_PATH, map_location="cpu").eval()
+        model=load_model()
         input_size, mean, std=preprocess_config()
         pixels=np.asarray(im.resize((input_size,input_size)), dtype=np.float32)/255.0
         tensor=torch.from_numpy(pixels).permute(2,0,1).unsqueeze(0)
@@ -240,13 +321,13 @@ async def predict(image:UploadFile=File(...), note:Optional[str]=Form(None)):
         }
     }
     with connection() as db:
-        cursor=db.execute("INSERT INTO predictions (created_at,fabric,confidence,payload) VALUES (?,?,?,?)",(record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
+        cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(request_uid(request),record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
         record["id"]=cursor.lastrowid
         db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
     return record
 
 @app.post("/api/feedback", summary="Human-in-the-loop active learning feedback")
-def feedback(payload: dict = Body(...)):
+def feedback(request: Request, payload: dict = Body(...)):
     pred_id = payload.get("prediction_id")
     image_token = payload.get("image_token")
     confirmed_fabric = str(payload.get("confirmed_fabric", "")).strip().lower()
@@ -255,38 +336,45 @@ def feedback(payload: dict = Body(...)):
     if confirmed_fabric not in FABRICS and confirmed_fabric != NON_FABRIC:
         raise HTTPException(422, f"Invalid fabric label: {confirmed_fabric}")
 
-    saved_path = None
-    if image_token:
-        src = os.path.join(UPLOADS_DIR, image_token)
-        if os.path.exists(src):
-            target_dir = os.path.join(DATA_DIR, "train", confirmed_fabric)
-            os.makedirs(target_dir, exist_ok=True)
-            target_name = f"user_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.jpg"
-            dest = os.path.join(target_dir, target_name)
-            shutil.copyfile(src, dest)
-            saved_path = os.path.relpath(dest, start=os.path.dirname(DATA_DIR))
+    if not isinstance(pred_id, int) or not image_token:
+        raise HTTPException(422, "Prediction id and image token are required.")
+    with connection() as db:
+        row = db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?", (pred_id, request_uid(request))).fetchone()
+    if not row:
+        raise HTTPException(404, "Prediction not found.")
+    rec = json.loads(row["payload"])
+    if image_token != rec.get("image_token"):
+        raise HTTPException(403, "Image token does not belong to this prediction.")
 
-    if pred_id:
-        with connection() as db:
-            row = db.execute("SELECT payload FROM predictions WHERE id=?", (pred_id,)).fetchone()
-            if row:
-                rec = json.loads(row["payload"])
-                rec["user_feedback"] = {
-                    "confirmed_fabric": confirmed_fabric,
-                    "was_correct": was_correct,
-                    "saved_to_dataset": bool(saved_path),
-                    "saved_path": saved_path,
-                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                }
-                db.execute("UPDATE predictions SET payload=? WHERE id=?", (json.dumps(rec), pred_id))
+    saved_path = None
+    src = os.path.join(UPLOADS_DIR, os.path.basename(image_token))
+    if os.path.exists(src):
+        target_dir = os.path.join(DATA_DIR, "review_pending", confirmed_fabric)
+        os.makedirs(target_dir, exist_ok=True)
+        target_name = f"user_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.jpg"
+        dest = os.path.join(target_dir, target_name)
+        shutil.copyfile(src, dest)
+        saved_path = os.path.relpath(dest, start=os.path.dirname(DATA_DIR))
+
+    rec["user_feedback"] = {
+        "confirmed_fabric": confirmed_fabric,
+        "was_correct": was_correct,
+        "saved_to_dataset": False,
+        "saved_path": saved_path,
+        "review_status": "pending" if saved_path else "metadata_only",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    }
+    with connection() as db:
+        db.execute("UPDATE predictions SET payload=? WHERE id=? AND owner_uid=?", (json.dumps(rec), pred_id, request_uid(request)))
 
     return {
         "status": "success",
         "confirmed_fabric": confirmed_fabric,
         "was_correct": was_correct,
-        "saved_to_dataset": bool(saved_path),
+        "saved_to_dataset": False,
         "saved_path": saved_path,
-        "message": f"Sample verified as {confirmed_fabric.capitalize()} and integrated into the active training dataset."
+        "review_status": "pending" if saved_path else "metadata_only",
+        "message": f"Correction submitted as {confirmed_fabric.capitalize()} for administrator review."
     }
 
 @app.get("/api/dataset/stats", summary="Get training dataset sample counts")
@@ -295,18 +383,14 @@ def dataset_stats():
     stats = {}
     total = 0
     user_contributed = 0
-    if os.path.exists(train_dir):
-        for item in [*FABRICS.keys(), NON_FABRIC]:
-            class_dir = os.path.join(train_dir, item)
-            if os.path.isdir(class_dir):
-                files = [f for f in os.listdir(class_dir) if os.path.isfile(os.path.join(class_dir, f))]
-                count = len(files)
-                user_count = sum(1 for f in files if f.startswith("user_"))
-                stats[item] = {"total": count, "user_verified": user_count}
-                total += count
-                user_contributed += user_count
-            else:
-                stats[item] = {"total": 0, "user_verified": 0}
+    for item in [*FABRICS.keys(), NON_FABRIC]:
+        class_dir = os.path.join(train_dir, item)
+        files = [f for f in os.listdir(class_dir) if os.path.isfile(os.path.join(class_dir, f))] if os.path.isdir(class_dir) else []
+        count = len(files)
+        user_count = sum(1 for f in files if f.startswith("user_"))
+        stats[item] = {"total": count, "user_verified": user_count}
+        total += count
+        user_contributed += user_count
     return {
         "total_samples": total,
         "user_contributed": user_contributed,
@@ -314,38 +398,39 @@ def dataset_stats():
     }
 
 @app.get("/api/history")
-def get_history(): return saved_history()
+def get_history(request: Request): return saved_history(request_uid(request))
 
 @app.get("/api/history/{record_id}")
-def get_one_history(record_id:int):
-    for item in saved_history():
+def get_one_history(record_id:int, request: Request):
+    for item in saved_history(request_uid(request)):
         if item["id"]==record_id: return item
     raise HTTPException(404,"Analysis not found")
 
 @app.patch("/api/history/{record_id}/note")
-def update_history_note(record_id:int, payload:dict=Body(...)):
+def update_history_note(record_id:int, request: Request, payload:dict=Body(...)):
     new_note=payload.get("note")
     if new_note is not None:
         new_note=str(new_note).strip()
         if len(new_note)>240: raise HTTPException(422,"Note cannot exceed 240 characters.")
         if not new_note: new_note=None
     with connection() as db:
-        row=db.execute("SELECT payload FROM predictions WHERE id=?",(record_id,)).fetchone()
+        owner_uid=request_uid(request)
+        row=db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?",(record_id,owner_uid)).fetchone()
         if not row: raise HTTPException(404,"Analysis not found")
         data=json.loads(row["payload"])
         data["note"]=new_note
-        db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(data),record_id))
+        db.execute("UPDATE predictions SET payload=? WHERE id=? AND owner_uid=?",(json.dumps(data),record_id,owner_uid))
     return data
 
 @app.delete("/api/history/{record_id}")
-def delete_history(record_id:int):
+def delete_history(record_id:int, request: Request):
     with connection() as db:
-        if not db.execute("DELETE FROM predictions WHERE id=?",(record_id,)).rowcount: raise HTTPException(404,"Analysis not found")
+        if not db.execute("DELETE FROM predictions WHERE id=? AND owner_uid=?",(record_id,request_uid(request))).rowcount: raise HTTPException(404,"Analysis not found")
     return {"deleted":True}
 
 @app.get("/api/history/export/csv")
-def export_history_csv():
-    history=saved_history()
+def export_history_csv(request: Request):
+    history=saved_history(request_uid(request))
     output=io.StringIO()
     writer=csv.writer(output)
     writer.writerow(["ID","Date","Fabric","Confidence (%)","Care Note","Wash Temp","Wash Cycle","Dry","Iron","Bleach","Eco Advice"])
@@ -373,16 +458,66 @@ def export_history_csv():
     )
 
 @app.delete("/api/history")
-def clear_history():
-    with connection() as db: db.execute("DELETE FROM predictions")
+def clear_history(request: Request):
+    with connection() as db: db.execute("DELETE FROM predictions WHERE owner_uid=?",(request_uid(request),))
     return {"deleted":True}
 
 @app.get("/api/analytics")
-def analytics():
-    history=saved_history()
+def analytics(request: Request):
+    history=saved_history(request_uid(request))
     categories=[*labels(), NON_FABRIC, "unknown"]
     counts={name:sum(item["fabric"]==name for item in history) for name in categories}
     return {"garments_analyzed":len(history),"most_detected_fabric":max(counts,key=counts.get) if history else None,"average_confidence":round(sum(item["confidence"] for item in history)/len(history),2) if history else None,"eco_recommendations":len(history),"distribution":counts,"note":"Analytics are derived only from stored predictions."}
+
+@app.get("/api/admin/overview")
+def admin_overview(request: Request):
+    admin = require_admin(request)
+    history = saved_history()
+    feedback_count = sum(1 for item in history if item.get("user_feedback"))
+    state=model_status()
+    return {
+        "admin_email": admin.get("email"),
+        "total_scans": len(history),
+        "feedback_records": feedback_count,
+        "model_ready": state["ready"],
+        "model_error": state["error"],
+        "dataset": dataset_stats(),
+        "retraining": RETRAIN_STATE,
+        "training_available": training_available(),
+    }
+
+@app.get("/api/admin/feedback")
+def admin_feedback(request: Request):
+    require_admin(request)
+    pending=[]
+    base=os.path.join(DATA_DIR,"review_pending")
+    for fabric_name in [*FABRICS.keys(), NON_FABRIC]:
+        folder=os.path.join(base,fabric_name)
+        if os.path.isdir(folder):
+            pending.extend({"fabric":fabric_name,"file":name} for name in sorted(os.listdir(folder)) if name.lower().endswith((".jpg",".jpeg",".png",".webp")))
+    return {"count":len(pending),"items":pending}
+
+@app.post("/api/admin/feedback/{fabric_name}/{filename}/approve")
+def approve_feedback(fabric_name: str, filename: str, request: Request):
+    require_admin(request)
+    if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
+    safe_name=os.path.basename(filename)
+    source=os.path.join(DATA_DIR,"review_pending",fabric_name,safe_name)
+    if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
+    target_dir=os.path.join(DATA_DIR,"train",fabric_name)
+    os.makedirs(target_dir,exist_ok=True)
+    target=os.path.join(target_dir,safe_name)
+    shutil.move(source,target)
+    return {"approved":True,"fabric":fabric_name,"file":safe_name}
+
+@app.delete("/api/admin/feedback/{fabric_name}/{filename}")
+def reject_feedback(fabric_name: str, filename: str, request: Request):
+    require_admin(request)
+    if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
+    source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))
+    if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
+    os.remove(source)
+    return {"rejected":True}
 
 @app.get("/api/model/info")
 def model_info():
@@ -392,7 +527,7 @@ def model_info():
         "architecture": manifest.get("architecture", "MobileNetV2 transfer learning"),
         "classes": model_labels(),
         "supported_fabrics": labels(),
-        "ready": os.path.exists(MODEL_PATH),
+        "ready": model_status()["ready"],
         "limitation": "Ambiguous or low-confidence inputs are rejected as 'unknown'. Clear non-fabric inputs can be classified as 'non_fabric'. Blends may still be difficult.",
         "acceptance_thresholds": {"min_confidence": round(min_confidence*100,2), "min_margin": round(min_margin*100,2)},
         "manifest": manifest or None
@@ -416,12 +551,20 @@ RETRAIN_STATE = {
     "message": "Ready to train on active learning dataset."
 }
 
+def training_available():
+    return os.getenv("ENABLE_RETRAINING", "false").lower() == "true" and all(
+        os.path.isdir(os.path.join(DATA_DIR, split)) for split in ("train", "val", "test")
+    )
+
 def _run_training_job():
     global RETRAIN_STATE
     import subprocess, sys
     try:
         script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train.py")
-        cmd = [sys.executable, script_path, "--data", DATA_DIR, "--epochs", "5", "--batch-size", "16"]
+        candidate_dir=os.path.join(os.path.dirname(MODEL_PATH),"candidates")
+        os.makedirs(candidate_dir,exist_ok=True)
+        candidate_path=os.path.join(candidate_dir,f"fabric_candidate_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.pt")
+        cmd = [sys.executable, script_path, "--data", DATA_DIR, "--epochs", "5", "--batch-size", "16", "--output", candidate_path]
         RETRAIN_STATE["status"] = "running"
         RETRAIN_STATE["started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         RETRAIN_STATE["message"] = "Retraining MobileNetV2 on verified dataset..."
@@ -429,7 +572,8 @@ def _run_training_job():
         if proc.returncode == 0:
             RETRAIN_STATE["status"] = "completed"
             RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            RETRAIN_STATE["message"] = "Retraining completed successfully. Model weights and metrics updated."
+            RETRAIN_STATE["message"] = "Candidate model trained. Review its held-out metrics before promotion."
+            RETRAIN_STATE["candidate_path"] = os.path.basename(candidate_path)
         else:
             RETRAIN_STATE["status"] = "failed"
             RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -440,8 +584,11 @@ def _run_training_job():
         RETRAIN_STATE["message"] = f"Error during training: {str(e)}"
 
 @app.post("/api/retrain", summary="Trigger continuous active learning model retraining")
-def trigger_retrain():
+def trigger_retrain(request: Request):
+    require_admin(request)
     import threading
+    if not training_available():
+        raise HTTPException(409, "Retraining is disabled or the train/val/test dataset is incomplete.")
     if RETRAIN_STATE["status"] == "running":
         raise HTTPException(409, "Model retraining is already running.")
     worker = threading.Thread(target=_run_training_job, daemon=True)
@@ -453,7 +600,8 @@ def trigger_retrain():
     }
 
 @app.get("/api/retrain/status", summary="Get model retraining job status")
-def retrain_status():
+def retrain_status(request: Request):
+    require_admin(request)
     return RETRAIN_STATE
 
 # Production deployment: the React build and API share one origin, so `/api`

@@ -1,7 +1,18 @@
 import io
+import os
+import tempfile
 import unittest
 from PIL import Image
 from fastapi.testclient import TestClient
+
+# Keep API tests isolated from the developer's real scan history and training
+# folders. These values must be set before importing app.main.
+TEST_ROOT = tempfile.TemporaryDirectory()
+os.environ["DATABASE_PATH"] = os.path.join(TEST_ROOT.name, "test.db")
+os.environ["DATA_DIR"] = os.path.join(TEST_ROOT.name, "data")
+os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"] = ""
+os.environ["FIREBASE_SERVICE_ACCOUNT_FILE"] = ""
+os.environ["ENABLE_RETRAINING"] = "false"
 from app.main import app, connection, FABRICS
 
 class TestLaundryAIAPI(unittest.TestCase):
@@ -9,12 +20,21 @@ class TestLaundryAIAPI(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(app)
 
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+        TEST_ROOT.cleanup()
+
     def test_01_health(self):
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["status"], "ok")
-        self.assertIn("model_ready", data)
+        self.assertTrue(data["model_ready"], data.get("model_error"))
+
+        root = self.client.get("/")
+        self.assertEqual(root.status_code, 200)
+        self.assertEqual(root.json()["health"], "/api/health")
 
     def test_02_fabrics_list(self):
         response = self.client.get("/api/fabrics")
@@ -184,7 +204,19 @@ class TestLaundryAIAPI(unittest.TestCase):
         pred = res.json()
         self.assertIn("image_token", pred)
 
-        # Submit active learning feedback confirming Silk
+        rejected = self.client.post(
+            "/api/feedback",
+            json={
+                "prediction_id": pred["id"],
+                "image_token": "upload_from_another_prediction.jpg",
+                "confirmed_fabric": "silk",
+                "was_prediction_correct": True,
+            },
+        )
+        self.assertEqual(rejected.status_code, 403)
+
+        # Feedback enters a private review queue; it must never become training
+        # data before an administrator checks the label.
         res_fb = self.client.post(
             "/api/feedback",
             json={
@@ -198,7 +230,8 @@ class TestLaundryAIAPI(unittest.TestCase):
         fb_data = res_fb.json()
         self.assertEqual(fb_data["status"], "success")
         self.assertEqual(fb_data["confirmed_fabric"], "silk")
-        self.assertTrue(fb_data["saved_to_dataset"])
+        self.assertFalse(fb_data["saved_to_dataset"])
+        self.assertEqual(fb_data["review_status"], "pending")
 
         # Check dataset stats endpoint
         res_stats = self.client.get("/api/dataset/stats")
@@ -218,10 +251,22 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertIn("confusion_matrix", metrics)
         self.assertIn("per_class_metrics", metrics)
 
+        # Administrative operations remain closed until Firebase Admin
+        # credentials are configured on the backend.
         res_retrain_stat = self.client.get("/api/retrain/status")
-        self.assertEqual(res_retrain_stat.status_code, 200)
-        self.assertIn("status", res_retrain_stat.json())
+        self.assertEqual(res_retrain_stat.status_code, 503)
+
+    def test_14_admin_identity_requires_verified_allowlisted_email(self):
+        from app.main import is_admin
+        from app import main
+        original = main.ADMIN_EMAILS
+        try:
+            main.ADMIN_EMAILS = {"admin@example.com"}
+            self.assertTrue(is_admin({"email": "ADMIN@example.com", "email_verified": True}))
+            self.assertFalse(is_admin({"email": "admin@example.com", "email_verified": False}))
+            self.assertFalse(is_admin({"email": "user@example.com", "email_verified": True}))
+        finally:
+            main.ADMIN_EMAILS = original
 
 if __name__ == "__main__":
     unittest.main()
-
