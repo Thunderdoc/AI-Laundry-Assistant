@@ -14,7 +14,14 @@ from . import firebase_store
 
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
 app = FastAPI(title="LaundryAI API", version="0.1.0", description="Experimental fabric-care service. Predictions require an exported trained model.")
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+configured_origins={origin.strip().rstrip("/") for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()}
+known_origins={
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://ai-laundry-assistant-thunderdoc.vercel.app",
+    "https://ai-laundry-assistant-psi.vercel.app",
+}
+app.add_middleware(CORSMiddleware, allow_origins=sorted(configured_origins | known_origins), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 FIREBASE_CONFIG = {
     "apiKey": os.getenv("FIREBASE_API_KEY", "").strip(),

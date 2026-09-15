@@ -115,9 +115,13 @@ function AuthGate() {
           }
         });
       } catch {
-        // A frontend-only Vercel deployment has no API yet. Keep the site usable
-        // in preview mode until a backend URL is configured.
-        setSettings({ enabled: false, firebase_config: null });
+        // A sleeping or temporarily unreachable backend must not make working
+        // browser-side Firebase sign-in disappear. Backend-protected features
+        // will remain unavailable until the API reconnects.
+        setSettings(firebaseWebConfigured
+          ? { enabled: true, firebase_config: firebaseWebConfig }
+          : { enabled: false, firebase_config: null });
+        setAuthNotice(firebaseWebConfigured ? "Sign-in is available. The AI service is reconnecting." : "Firebase setup is incomplete.");
       }
     })();
     return () => unsubscribe?.();
