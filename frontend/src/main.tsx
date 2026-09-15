@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithRedirect, signOut } from "firebase/auth";
+import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import "./style.css";
 
 // Local production uses the same origin. On Vercel set VITE_API_URL to the
@@ -94,8 +94,7 @@ function AuthGate() {
     setIsSigningIn(true);
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
-      // Redirect avoids popup restrictions and works consistently in private browsing.
-      await signInWithRedirect(getAuth(app), new GoogleAuthProvider());
+      await signInWithPopup(getAuth(app), new GoogleAuthProvider());
     } catch (error) {
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Google sign-in was cancelled or failed.");
     } finally {
