@@ -102,7 +102,10 @@ function AuthGate() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ id_token: idToken }),
             });
-            if (!verified.ok) throw new Error((await verified.json()).detail || "Could not verify sign-in.");
+            if (!verified.ok) {
+              const failure=await verified.json().catch(() => ({}));
+              throw new Error(failure.detail || "Could not verify sign-in.");
+            }
             const account = await verified.json();
             localStorage.setItem("laundryai_firebase_token", idToken);
             setUser(account);

@@ -50,11 +50,24 @@ def verify_firebase_token(id_token: str):
     if account_file and not os.path.isfile(account_file):
         raise HTTPException(503, "Firebase service-account file was not found on the server.")
     try:
-        return firebase_admin_auth_client().verify_id_token(id_token, check_revoked=True)
+        # Signature/audience/expiry verification is sufficient for normal API
+        # requests and avoids an additional Identity Toolkit lookup on every
+        # call. Disabled accounts have their refresh tokens revoked by the admin
+        # endpoint, so their short-lived ID token expires naturally.
+        return firebase_admin_auth_client().verify_id_token(id_token)
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(401, "Google sign-in could not be verified.") from exc
+        error_name=type(exc).__name__
+        if error_name in {"ExpiredIdTokenError", "RevokedIdTokenError"}:
+            detail="Your sign-in session expired. Sign in again."
+        elif error_name in {"CertificateFetchError", "TransportError"}:
+            raise HTTPException(503, "Firebase verification is temporarily unavailable.") from exc
+        elif error_name in {"InvalidIdTokenError", "InvalidSessionCookieError", "ValueError"}:
+            detail="Firebase returned an invalid sign-in token."
+        else:
+            detail=f"Firebase server credentials could not verify sign-in ({error_name})."
+        raise HTTPException(401, detail) from exc
 
 def is_admin(user: dict | None) -> bool:
     return bool(
