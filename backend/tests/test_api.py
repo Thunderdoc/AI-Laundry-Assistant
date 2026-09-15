@@ -268,5 +268,10 @@ class TestLaundryAIAPI(unittest.TestCase):
         finally:
             main.ADMIN_EMAILS = original
 
+    def test_15_firebase_public_config_has_no_surrounding_whitespace(self):
+        from app.main import FIREBASE_CONFIG
+        for value in FIREBASE_CONFIG.values():
+            self.assertEqual(value, value.strip())
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,12 +16,12 @@ app = FastAPI(title="LaundryAI API", version="0.1.0", description="Experimental 
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(","), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 FIREBASE_CONFIG = {
-    "apiKey": os.getenv("FIREBASE_API_KEY", ""),
-    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN", ""),
-    "projectId": os.getenv("FIREBASE_PROJECT_ID", ""),
-    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET", ""),
-    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID", ""),
-    "appId": os.getenv("FIREBASE_APP_ID", ""),
+    "apiKey": os.getenv("FIREBASE_API_KEY", "").strip(),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN", "").strip(),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID", "").strip(),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET", "").strip(),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID", "").strip(),
+    "appId": os.getenv("FIREBASE_APP_ID", "").strip(),
 }
 ADMIN_EMAILS = {email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "").split(",") if email.strip()}
 
