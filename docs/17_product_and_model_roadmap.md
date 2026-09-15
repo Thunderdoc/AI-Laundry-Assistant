@@ -28,6 +28,7 @@ This loop protects the dataset from incorrect labels and prevents a weak candida
 - Root Directory: `backend`
 - Build Command: `pip install -r requirements.txt`
 - Start Command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- `PYTHON_VERSION=3.11.11` (prevents Render's Python 3.14 default from breaking TorchScript)
 - `MODEL_PATH=backend/models/fabric_mobilenetv2.pt`
 - `CORS_ORIGINS=https://ai-laundry-assistant-thunderdoc.vercel.app`
 - `ADMIN_EMAILS=<verified-admin-email>` (for this deployment, use the email selected by the project owner)
