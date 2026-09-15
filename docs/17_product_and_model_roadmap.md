@@ -2,9 +2,9 @@
 
 ## Current system status
 
-The application is split into a React/Vite frontend on Vercel and a FastAPI model API on Render. Firebase Authentication provides email/password and Google sign-in. Firebase Realtime Database stores each signed-in user's profile and scan-history metadata. The backend verifies Firebase ID tokens when its server credentials are configured, scopes SQLite history by Firebase UID, and grants administrator access only to verified emails in the server-side `ADMIN_EMAILS` allowlist.
+The application is split into a React/Vite frontend on Vercel and a FastAPI model API on Render. Firebase Authentication provides email/password and Google sign-in. The backend can use Firebase Realtime Database as the canonical prediction/feedback store and Firebase Storage for private images. It verifies Firebase ID tokens, scopes history by Firebase UID, and grants administrator access only to verified emails in the server-side `ADMIN_EMAILS` allowlist. SQLite and local image folders remain a development/test fallback.
 
-The repository contains a tracked TorchScript model and manifest. Runtime health now performs a real CPU load and sample forward pass. The manifest reports a held-out test accuracy of 79.43% and macro F1 of 0.8012; treat these as artifact-declared metrics until the original split and evaluation are independently reproduced.
+The repository contains a tracked TorchScript model and manifest. Runtime health performs a real CPU load and sample forward pass. The tracked deployment manifest reports 76.24% test accuracy on 282 images. Treat this as an artifact-declared result until the original split and evaluation are independently reproduced; the next candidate must also report macro F1 and stronger per-class/OOD evaluation.
 
 ## Implemented active-learning loop
 
@@ -33,7 +33,9 @@ This loop protects the dataset from incorrect labels and prevents a weak candida
 - `CORS_ORIGINS=https://ai-laundry-assistant-thunderdoc.vercel.app`
 - `ADMIN_EMAILS=<verified-admin-email>` (for this deployment, use the email selected by the project owner)
 - Firebase web config: `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, `FIREBASE_STORAGE_BUCKET`, `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_APP_ID`
+- `FIREBASE_DATABASE_URL=https://laundry-ai-70989-default-rtdb.asia-southeast1.firebasedatabase.app`
 - Backend secret: `FIREBASE_SERVICE_ACCOUNT_JSON` containing the complete service-account JSON on one line
+- `PERSISTENCE_BACKEND=firebase` enables durable records and image storage. Set this only after the database URL, bucket, and service-account credential are valid.
 - Keep `ENABLE_RETRAINING=false` on the free web service.
 
 After deployment, verify `https://ai-laundry-assistant.onrender.com/api/health`. Required result: `status=ok` and `model_ready=true`. If not, use the returned `model_error`; do not connect the frontend to a degraded model API.
@@ -47,17 +49,17 @@ After deployment, verify `https://ai-laundry-assistant.onrender.com/api/health`.
 
 ## Database and storage evolution
 
-The current combination is suitable for a prototype but not a durable production training system. Render's free filesystem is ephemeral, so pending images and SQLite records can disappear during rebuilds or restarts.
+The Firebase persistence adapter removes Render's ephemeral filesystem from the production prediction and feedback path. Render's SQLite/filesystem path remains only for local development when `PERSISTENCE_BACKEND=local`.
 
 Next production architecture:
 
-- Firebase Realtime Database: user profile, scan metadata, feedback state, lightweight notifications.
-- Firebase Storage: uploaded and pending-review images using UID-based paths and restrictive Storage Rules.
-- Managed PostgreSQL: authoritative prediction, audit, model-version, moderation, and job records.
+- Firebase Realtime Database: user profiles, predictions, feedback state, audit events, and lightweight notifications.
+- Firebase Storage: private uploads, pending-review images, and approved training contributions.
+- A managed PostgreSQL migration remains optional later if reporting/query requirements outgrow Realtime Database.
 - Object storage lifecycle: automatically delete raw images after a defined retention period unless the user explicitly opts into training contribution.
 - Never store base64 image previews in Realtime Database.
 
-Recommended entities are `users`, `predictions`, `feedback`, `model_versions`, `training_jobs`, and `audit_events`. Each prediction records `owner_uid` and `model_version`; each feedback item records reviewer, decision, and timestamps.
+Canonical paths are `users`, `predictions`, `feedback`, `modelVersions`, `trainingJobs`, and `auditEvents`. Each prediction records `owner_uid`; each feedback item records its reviewer, decision, and timestamps. The service account is backend-only, so browser database rules never grant global prediction or feedback access.
 
 ## Secure administrator capabilities
 
@@ -107,7 +109,7 @@ Admin identity must always be decided by verified backend claims or an allowlist
 
 ## Backend engineering backlog
 
-- Move durable records to PostgreSQL and images to Firebase Storage.
+- Add indexes/denormalized counters as Realtime Database usage grows; consider PostgreSQL only if advanced reporting later requires it.
 - Add request IDs, structured logs, rate limiting, upload-size limits, MIME sniffing, and retention jobs.
 - Add queued training jobs rather than an in-process thread.
 - Version the API and model response schema.

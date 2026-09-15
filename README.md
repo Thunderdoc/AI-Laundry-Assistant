@@ -21,7 +21,9 @@ Open `http://localhost:5173`; API documentation is at `http://127.0.0.1:8000/doc
 
 ## Architecture
 
-Image validation → trained model (when supplied) → confidence + top-2 margin gate (`unknown` for low certainty) + explicit `non_fabric` class → documented fabric knowledge base → rule-based care and eco recommendations → history/analytics.
+Image validation → trained model (when supplied) → confidence + top-2 margin gate (`unknown` for low certainty) + explicit `non_fabric` class → documented fabric knowledge base → rule-based care and eco recommendations → history/analytics. Production can use Firebase Realtime Database and Firebase Storage through the backend; SQLite/local folders remain the development fallback.
+
+Set `PERSISTENCE_BACKEND=firebase` together with the backend `FIREBASE_DATABASE_URL`, storage bucket, and service-account credential to enable durable cloud records. See `docs/18_firebase_persistence_setup.md` before switching it on.
 
 The current repository contains validated upload handling, a structured five-fabric knowledge base, API contract, responsive analysis interface, and honest model/metrics gates. Add the trained artifact at the configured `MODEL_PATH`, alongside a label-order and preprocessing manifest, before enabling inference.
 

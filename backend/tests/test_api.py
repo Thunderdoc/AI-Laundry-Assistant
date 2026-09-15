@@ -2,6 +2,7 @@ import io
 import os
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from PIL import Image
 from fastapi.testclient import TestClient
 
@@ -272,6 +273,41 @@ class TestLaundryAIAPI(unittest.TestCase):
         from app.main import FIREBASE_CONFIG
         for value in FIREBASE_CONFIG.values():
             self.assertEqual(value, value.strip())
+
+    def test_16_local_persistence_health_contract(self):
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        persistence = response.json()["persistence"]
+        self.assertEqual(persistence["backend"], "local")
+        self.assertEqual(persistence["database"], "sqlite")
+        self.assertTrue(persistence["configured"])
+
+    def test_17_firebase_prediction_write_cleans_up_if_database_fails(self):
+        from app import firebase_store
+        bucket = Mock()
+        blob = Mock()
+        bucket.blob.return_value = blob
+        database_ref = Mock()
+        database_ref.set.side_effect = RuntimeError("database offline")
+        with patch.object(firebase_store, "_bucket", return_value=bucket), patch.object(firebase_store, "_root", return_value=database_ref):
+            with self.assertRaises(RuntimeError):
+                firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
+        blob.upload_from_string.assert_called_once_with(b"jpeg", content_type="image/jpeg")
+        blob.delete.assert_called_once()
+
+    def test_18_firebase_feedback_uses_atomic_metadata_update(self):
+        from app import firebase_store
+        bucket = Mock()
+        bucket.blob.side_effect = lambda path: Mock(name=path)
+        root = Mock()
+        prediction = {"id": "prediction-1", "owner_uid": "uid-1", "image_token": "private-uploads/uid-1/prediction-1.jpg", "fabric": "cotton"}
+        with patch.object(firebase_store, "_bucket", return_value=bucket), patch.object(firebase_store, "_root", return_value=root):
+            result = firebase_store.submit_feedback(prediction, "silk", False)
+        bucket.copy_blob.assert_called_once()
+        root.update.assert_called_once()
+        updates = root.update.call_args.args[0]
+        self.assertIn(f"feedback/{result['id']}", updates)
+        self.assertIn("predictions/prediction-1/user_feedback", updates)
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from PIL import Image, ImageStat
 from .knowledge_base import FABRICS, recommendation
+from . import firebase_store
 
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
 app = FastAPI(title="LaundryAI API", version="0.1.0", description="Experimental fabric-care service. Predictions require an exported trained model.")
@@ -109,6 +110,13 @@ def request_uid(request: Request) -> str:
     return str(user.get("uid")) if user and user.get("uid") else "local-preview"
 
 def saved_history(owner_uid: str | None = None):
+    if firebase_store.enabled():
+        if not firebase_store.configured():
+            raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
+        try:
+            return firebase_store.list_predictions(owner_uid)
+        except Exception as exc:
+            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
     with connection() as db:
         if owner_uid is None:
             rows=db.execute("SELECT payload FROM predictions ORDER BY id DESC")
@@ -216,7 +224,9 @@ def root(): return {"service":"LaundryAI API", "health":"/api/health", "docs":"/
 @app.get("/api/health")
 def health():
     state=model_status()
-    return {"status":"ok" if state["ready"] else "degraded", "model_ready":state["ready"], "model_error":state["error"]}
+    persistence=firebase_store.status(probe=True)
+    healthy=state["ready"] and persistence["configured"] and persistence.get("reachable",True)
+    return {"status":"ok" if healthy else "degraded", "model_ready":state["ready"], "model_error":state["error"], "persistence":persistence}
 
 @app.get("/api/auth/config")
 def firebase_auth_config():
@@ -258,13 +268,19 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
         im=Image.open(io.BytesIO(data)).convert("RGB")
     except Exception: raise HTTPException(422,"Invalid image.")
     
-    # Save raw upload for active learning feedback
+    # Prepare a normalized JPEG for private feedback storage. In production it
+    # is uploaded to Firebase Storage; local development keeps the old folder.
+    normalized_image=io.BytesIO()
+    im.save(normalized_image, format="JPEG", quality=92, optimize=True)
+    normalized_bytes=normalized_image.getvalue()
     image_token = f"upload_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
-    upload_path = os.path.join(UPLOADS_DIR, image_token)
-    try:
-        im.save(upload_path, format="JPEG", quality=95)
-    except Exception:
-        pass
+    if not firebase_store.enabled():
+        upload_path = os.path.join(UPLOADS_DIR, image_token)
+        try:
+            with open(upload_path, "wb") as upload_file:
+                upload_file.write(normalized_bytes)
+        except Exception:
+            pass
 
     sample=ImageStat.Stat(im.resize((64,64)))
     texture=round(sum(sample.stddev)/3,1)
@@ -320,10 +336,19 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
             }
         }
     }
-    with connection() as db:
-        cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(request_uid(request),record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
-        record["id"]=cursor.lastrowid
-        db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
+    owner_uid=request_uid(request)
+    if firebase_store.enabled():
+        if not firebase_store.configured():
+            raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
+        try:
+            record=firebase_store.create_prediction(owner_uid, record, normalized_bytes)
+        except Exception as exc:
+            raise HTTPException(503, f"Could not save the prediction to Firebase: {exc}") from exc
+    else:
+        with connection() as db:
+            cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(owner_uid,record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
+            record["id"]=cursor.lastrowid
+            db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
     return record
 
 @app.post("/api/feedback", summary="Human-in-the-loop active learning feedback")
@@ -336,15 +361,33 @@ def feedback(request: Request, payload: dict = Body(...)):
     if confirmed_fabric not in FABRICS and confirmed_fabric != NON_FABRIC:
         raise HTTPException(422, f"Invalid fabric label: {confirmed_fabric}")
 
-    if not isinstance(pred_id, int) or not image_token:
+    if not isinstance(pred_id, (int, str)) or not str(pred_id).strip() or not image_token:
         raise HTTPException(422, "Prediction id and image token are required.")
-    with connection() as db:
-        row = db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?", (pred_id, request_uid(request))).fetchone()
-    if not row:
-        raise HTTPException(404, "Prediction not found.")
-    rec = json.loads(row["payload"])
+    owner_uid=request_uid(request)
+    if firebase_store.enabled():
+        try:
+            rec=firebase_store.get_prediction(str(pred_id), owner_uid)
+        except Exception as exc:
+            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+    else:
+        with connection() as db:
+            row = db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?", (pred_id, owner_uid)).fetchone()
+        rec=json.loads(row["payload"]) if row else None
+    if not rec: raise HTTPException(404, "Prediction not found.")
     if image_token != rec.get("image_token"):
         raise HTTPException(403, "Image token does not belong to this prediction.")
+
+    if firebase_store.enabled():
+        try:
+            item=firebase_store.submit_feedback(rec, confirmed_fabric, was_correct)
+        except Exception as exc:
+            raise HTTPException(503, f"Could not store feedback in Firebase: {exc}") from exc
+        return {
+            "status":"success", "confirmed_fabric":confirmed_fabric,
+            "was_correct":was_correct, "saved_to_dataset":False,
+            "review_status":"pending", "feedback_id":item["id"],
+            "message":f"Correction submitted as {confirmed_fabric.capitalize()} for administrator review."
+        }
 
     saved_path = None
     src = os.path.join(UPLOADS_DIR, os.path.basename(image_token))
@@ -365,7 +408,7 @@ def feedback(request: Request, payload: dict = Body(...)):
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     }
     with connection() as db:
-        db.execute("UPDATE predictions SET payload=? WHERE id=? AND owner_uid=?", (json.dumps(rec), pred_id, request_uid(request)))
+        db.execute("UPDATE predictions SET payload=? WHERE id=? AND owner_uid=?", (json.dumps(rec), pred_id, owner_uid))
 
     return {
         "status": "success",
@@ -391,6 +434,16 @@ def dataset_stats():
         stats[item] = {"total": count, "user_verified": user_count}
         total += count
         user_contributed += user_count
+    if firebase_store.enabled() and firebase_store.configured():
+        try:
+            for item, count in firebase_store.approved_counts().items():
+                if item in stats:
+                    stats[item]["total"] += count
+                    stats[item]["user_verified"] += count
+                    total += count
+                    user_contributed += count
+        except Exception as exc:
+            raise HTTPException(503, f"Could not load cloud dataset statistics: {exc}") from exc
     return {
         "total_samples": total,
         "user_contributed": user_contributed,
@@ -401,20 +454,27 @@ def dataset_stats():
 def get_history(request: Request): return saved_history(request_uid(request))
 
 @app.get("/api/history/{record_id}")
-def get_one_history(record_id:int, request: Request):
+def get_one_history(record_id:str, request: Request):
     for item in saved_history(request_uid(request)):
-        if item["id"]==record_id: return item
+        if str(item["id"])==record_id: return item
     raise HTTPException(404,"Analysis not found")
 
 @app.patch("/api/history/{record_id}/note")
-def update_history_note(record_id:int, request: Request, payload:dict=Body(...)):
+def update_history_note(record_id:str, request: Request, payload:dict=Body(...)):
     new_note=payload.get("note")
     if new_note is not None:
         new_note=str(new_note).strip()
         if len(new_note)>240: raise HTTPException(422,"Note cannot exceed 240 characters.")
         if not new_note: new_note=None
+    owner_uid=request_uid(request)
+    if firebase_store.enabled():
+        try:
+            data=firebase_store.update_prediction(record_id,owner_uid,{"note":new_note})
+        except Exception as exc:
+            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+        if not data: raise HTTPException(404,"Analysis not found")
+        return data
     with connection() as db:
-        owner_uid=request_uid(request)
         row=db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?",(record_id,owner_uid)).fetchone()
         if not row: raise HTTPException(404,"Analysis not found")
         data=json.loads(row["payload"])
@@ -423,7 +483,14 @@ def update_history_note(record_id:int, request: Request, payload:dict=Body(...))
     return data
 
 @app.delete("/api/history/{record_id}")
-def delete_history(record_id:int, request: Request):
+def delete_history(record_id:str, request: Request):
+    if firebase_store.enabled():
+        try:
+            deleted=firebase_store.delete_prediction(record_id,request_uid(request))
+        except Exception as exc:
+            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+        if not deleted: raise HTTPException(404,"Analysis not found")
+        return {"deleted":True}
     with connection() as db:
         if not db.execute("DELETE FROM predictions WHERE id=? AND owner_uid=?",(record_id,request_uid(request))).rowcount: raise HTTPException(404,"Analysis not found")
     return {"deleted":True}
@@ -459,6 +526,11 @@ def export_history_csv(request: Request):
 
 @app.delete("/api/history")
 def clear_history(request: Request):
+    if firebase_store.enabled():
+        try:
+            return {"deleted":True,"count":firebase_store.clear_predictions(request_uid(request))}
+        except Exception as exc:
+            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
     with connection() as db: db.execute("DELETE FROM predictions WHERE owner_uid=?",(request_uid(request),))
     return {"deleted":True}
 
@@ -481,6 +553,7 @@ def admin_overview(request: Request):
         "feedback_records": feedback_count,
         "model_ready": state["ready"],
         "model_error": state["error"],
+        "persistence": firebase_store.status(),
         "dataset": dataset_stats(),
         "retraining": RETRAIN_STATE,
         "training_available": training_available(),
@@ -489,6 +562,18 @@ def admin_overview(request: Request):
 @app.get("/api/admin/feedback")
 def admin_feedback(request: Request):
     require_admin(request)
+    if firebase_store.enabled():
+        try:
+            items=firebase_store.list_feedback("pending")
+        except Exception as exc:
+            raise HTTPException(503, f"Cloud feedback queue is unavailable: {exc}") from exc
+        return {"count":len(items),"items":[{
+            "id":item["id"], "fabric":item["confirmed_fabric"],
+            "file":item["id"], "filename":item.get("filename"),
+            "original_fabric":item.get("original_fabric"),
+            "created_at":item.get("created_at"),
+            "image_url":f"/api/admin/feedback/{item['confirmed_fabric']}/{item['id']}/image",
+        } for item in items]}
     pending=[]
     base=os.path.join(DATA_DIR,"review_pending")
     for fabric_name in [*FABRICS.keys(), NON_FABRIC]:
@@ -497,11 +582,33 @@ def admin_feedback(request: Request):
             pending.extend({"fabric":fabric_name,"file":name} for name in sorted(os.listdir(folder)) if name.lower().endswith((".jpg",".jpeg",".png",".webp")))
     return {"count":len(pending),"items":pending}
 
-@app.post("/api/admin/feedback/{fabric_name}/{filename}/approve")
-def approve_feedback(fabric_name: str, filename: str, request: Request):
+@app.get("/api/admin/feedback/{fabric_name}/{filename}/image")
+def admin_feedback_image(fabric_name: str, filename: str, request: Request):
     require_admin(request)
     if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
+    if firebase_store.enabled():
+        try:
+            content=firebase_store.feedback_image(os.path.basename(filename))
+        except Exception as exc:
+            raise HTTPException(503, f"Could not load feedback image: {exc}") from exc
+        if content is None: raise HTTPException(404,"Pending feedback image not found.")
+        return Response(content=content,media_type="image/jpeg",headers={"Cache-Control":"private, no-store"})
+    source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))
+    if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
+    return FileResponse(source,media_type="image/jpeg",headers={"Cache-Control":"private, no-store"})
+
+@app.post("/api/admin/feedback/{fabric_name}/{filename}/approve")
+def approve_feedback(fabric_name: str, filename: str, request: Request):
+    admin=require_admin(request)
+    if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
     safe_name=os.path.basename(filename)
+    if firebase_store.enabled():
+        try:
+            item=firebase_store.review_feedback(safe_name,str(admin.get("uid")),True)
+        except Exception as exc:
+            raise HTTPException(503, f"Could not approve feedback: {exc}") from exc
+        if not item: raise HTTPException(404,"Pending feedback image not found.")
+        return {"approved":True,"fabric":item["confirmed_fabric"],"file":item["filename"]}
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,safe_name)
     if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
     target_dir=os.path.join(DATA_DIR,"train",fabric_name)
@@ -512,8 +619,15 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
 
 @app.delete("/api/admin/feedback/{fabric_name}/{filename}")
 def reject_feedback(fabric_name: str, filename: str, request: Request):
-    require_admin(request)
+    admin=require_admin(request)
     if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
+    if firebase_store.enabled():
+        try:
+            item=firebase_store.review_feedback(os.path.basename(filename),str(admin.get("uid")),False)
+        except Exception as exc:
+            raise HTTPException(503, f"Could not reject feedback: {exc}") from exc
+        if not item: raise HTTPException(404,"Pending feedback image not found.")
+        return {"rejected":True}
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))
     if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
     os.remove(source)

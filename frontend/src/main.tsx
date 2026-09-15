@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
-import { getDatabase, onValue, ref, set } from "firebase/database";
+import { getDatabase, ref, set } from "firebase/database";
 import "./style.css";
 
 // Local production uses the same origin. On Vercel set VITE_API_URL to the
@@ -224,7 +224,7 @@ type Alternative = {
 };
 
 type Prediction = {
-  id: number;
+  id: number | string;
   created_at: string;
   fabric: string;
   confidence: number;
@@ -253,6 +253,38 @@ type Prediction = {
     };
   };
 };
+
+type AdminFeedbackItem = {
+  id?: string;
+  fabric: string;
+  file: string;
+  filename?: string;
+  original_fabric?: string;
+  created_at?: string;
+};
+
+function AdminFeedbackPreview({ item }: { item: AdminFeedbackItem }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    let active = true;
+    void apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/image`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Preview unavailable");
+        objectUrl = URL.createObjectURL(await response.blob());
+        if (active) setSource(objectUrl);
+      })
+      .catch(() => { if (active) setFailed(true); });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [item.fabric, item.file]);
+  if (failed) return <div className="admin-preview-placeholder">Preview unavailable</div>;
+  if (!source) return <div className="admin-preview-placeholder">Loading image…</div>;
+  return <img className="admin-feedback-preview" src={source} alt={`Submitted ${item.fabric} feedback`} />;
+}
 
 type Analytics = {
   garments_analyzed: number;
@@ -580,13 +612,13 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [history, setHistory] = useState<Prediction[]>([]);
   const [historySearch, setHistorySearch] = useState("");
   const [historyFilter, setHistoryFilter] = useState<string>("all");
-  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
+  const [editingNoteId, setEditingNoteId] = useState<number | string | null>(null);
   const [editingNoteText, setEditingNoteText] = useState("");
   const [analytics, setAnalytics] = useState<Analytics | undefined>();
   const [datasetStats, setDatasetStats] = useState<DatasetStats | undefined>();
   const [modelMetrics, setModelMetrics] = useState<any>(null);
   const [adminOverview, setAdminOverview] = useState<any>(null);
-  const [adminFeedback, setAdminFeedback] = useState<Array<{ fabric: string; file: string }>>([]);
+  const [adminFeedback, setAdminFeedback] = useState<AdminFeedbackItem[]>([]);
   const [adminMessage, setAdminMessage] = useState("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
   const [compareActive, setCompareActive] = useState(false);
@@ -655,24 +687,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     }
     return () => { if (timer) window.clearInterval(timer); };
   }, [user.is_admin, adminOverview?.retraining?.status]);
-
-  useEffect(() => {
-    if (user.guest || !firebaseWebConfig.databaseURL) return;
-    const app = getApps().length ? getApp() : initializeApp(firebaseWebConfig);
-    return onValue(ref(getDatabase(app), `users/${user.uid}/history`), (snapshot) => {
-      const stored = snapshot.val() as Record<string, Prediction> | null;
-      if (!stored) return;
-      setHistory(Object.values(stored).sort((a, b) => b.created_at.localeCompare(a.created_at)));
-    });
-  }, [user.guest, user.uid]);
-
-  const saveFirebaseHistory = async (prediction: Prediction) => {
-    if (user.guest || !firebaseWebConfig.databaseURL) return;
-    const app = getApps().length ? getApp() : initializeApp(firebaseWebConfig);
-    // Images and short-lived image tokens are deliberately excluded for privacy and storage cost.
-    const { image_token: _imageToken, ...safePrediction } = prediction;
-    await set(ref(getDatabase(app), `users/${user.uid}/history/${prediction.id}`), safePrediction);
-  };
 
   useEffect(() => {
     if (stream && video.current) {
@@ -878,11 +892,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         throw data;
       }
       setResult(data);
-      try {
-        await saveFirebaseHistory(data);
-      } catch {
-        // A prediction remains usable if an optional cloud-history write is unavailable.
-      }
       setStatus("Analysis complete.");
       setAnalysisStep(5);
       setNoteError("");
@@ -986,7 +995,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   };
 
 
-  const saveEditedNote = async (id: number) => {
+  const saveEditedNote = async (id: number | string) => {
     const trimmed = editingNoteText.trim();
     if (trimmed.length > NOTE_MAX_LENGTH) {
       alert(`Note must be ${NOTE_MAX_LENGTH} characters or fewer.`);
@@ -2689,7 +2698,12 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
             </div>
             {adminFeedback.length ? adminFeedback.map((item) => (
               <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
-                <div><strong>{item.fabric}</strong><small>{item.file}</small></div>
+                <AdminFeedbackPreview item={item} />
+                <div className="admin-review-copy">
+                  <strong>{item.fabric}</strong>
+                  {item.original_fabric && <span>Model predicted: {item.original_fabric}</span>}
+                  <small>{item.filename || item.file}</small>
+                </div>
                 <div className="admin-row-actions">
                   <button type="button" className="btn btn-primary" onClick={async () => {
                     const response=await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`,{method:"POST"});

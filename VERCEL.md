@@ -26,3 +26,7 @@ Do not put `FIREBASE_SERVICE_ACCOUNT_JSON` in Vercel. It is a private backend-on
 Open `https://ai-laundry-assistant.onrender.com/api/health` first. Connect or redeploy the frontend only when it reports `"model_ready": true`. The backend now includes a `model_error` field whenever model validation fails. On Render, set `MODEL_PATH=backend/models/fabric_mobilenetv2.pt`; the API also falls back to the tracked bundled model if a stale configured path does not exist.
 
 Render currently defaults new Python services to Python 3.14, which is incompatible with this TorchScript runtime. This repository pins `backend/.python-version` to `3.11.11`. Also set `PYTHON_VERSION=3.11.11` in the Render service environment so it takes precedence, then rebuild without relying on the old Python 3.14 environment.
+
+## Enable durable Firebase persistence
+
+On Render, add `FIREBASE_DATABASE_URL` using the Realtime Database URL and set `PERSISTENCE_BACKEND=firebase`. The existing `FIREBASE_STORAGE_BUCKET` and valid service-account JSON are also required. Once enabled, predictions and review metadata are stored in Realtime Database, and private/pending/approved images are stored in Firebase Storage. If any required value is missing, `/api/health` reports a degraded persistence configuration instead of silently losing records to Render's temporary disk.
