@@ -200,6 +200,72 @@ body {
 .admin-badges .warn { background: #fff4d7; color: #7b5500; }
 .admin-badges .admin-badge { background: #e8efff; color: #3158a6; }
 .admin-badges .danger { background: #ffe8e5; color: #a53024; }
+.motion-word { display: inline-block; }
+
+/* Operational console: intentionally distinct from the customer application. */
+main.admin-page { max-width: none; margin: 0; padding: 24px clamp(18px,4vw,64px) 72px; color: #dce9e4; background: radial-gradient(circle at 92% 2%,rgba(20,121,91,.22),transparent 30%), linear-gradient(180deg,#081410 0%,#0c1915 100%); }
+.admin-page .admin-command-bar, .admin-page .admin-hero, .admin-console-shell { width: min(1440px,100%); margin-inline: auto; }
+.admin-command-bar { display: flex; align-items: center; gap: 18px; margin-bottom: 14px !important; color: #78968a; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+.admin-command-bar > span { display: flex; align-items: center; gap: 8px; color: #e8f4ef; font-weight: 800; }
+.admin-command-bar i { width: 7px; height: 7px; border-radius: 50%; background: #39d39f; box-shadow: 0 0 0 5px rgba(57,211,159,.1); }
+.admin-command-bar strong { margin-left: auto; color: #9db7ad; font-size: 10px; }
+.admin-page .admin-hero { align-items: center; padding: 32px 38px; border: 1px solid rgba(132,180,162,.18); border-radius: 20px; background: linear-gradient(120deg,rgba(13,64,49,.84),rgba(9,39,31,.9)); box-shadow: 0 24px 80px rgba(0,0,0,.25); }
+.admin-page .admin-hero::after { border-color: rgba(70,218,164,.09); }
+.admin-page .admin-hero h1 { font-size: clamp(30px,4vw,52px); letter-spacing: -2px; }
+.admin-page .admin-hero p { max-width: 720px; margin: 0; color: #a9c5ba; }
+.admin-page .admin-identity { border-color: rgba(124,203,174,.22); background: rgba(3,18,14,.5); }
+.admin-console-shell { display: grid; grid-template-columns: 255px minmax(0,1fr); gap: 20px; align-items: start; margin-top: 20px; }
+.admin-command-rail { position: sticky; top: 98px; padding: 15px; border: 1px solid rgba(133,177,160,.14); border-radius: 18px; background: rgba(15,31,25,.86); box-shadow: 0 18px 50px rgba(0,0,0,.22); backdrop-filter: blur(18px); }
+.admin-rail-heading { display: grid; gap: 3px; padding: 10px 11px 15px; }
+.admin-rail-heading span { color: #f0f8f5; font-size: 13px; font-weight: 800; }
+.admin-rail-heading small { color: #708c81; font-size: 10px; }
+.admin-page .admin-tabs { position: static; display: grid; gap: 6px; margin: 0; padding: 0; overflow: visible; border: 0; border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
+.admin-page .admin-tabs button { display: grid; grid-template-columns: 25px 1fr; gap: 9px; align-items: start; min-height: 62px; padding: 11px; border: 1px solid transparent; border-radius: 12px; color: #8ba49a; text-align: left; }
+.admin-page .admin-tabs button > b { padding-top: 2px; color: #547166; font-size: 9px; letter-spacing: .8px; }
+.admin-page .admin-tabs button > span { display: grid; gap: 3px; color: inherit; font-size: 12px; }
+.admin-page .admin-tabs button small { color: #637e74; font-size: 9px; font-weight: 600; }
+.admin-page .admin-tabs button:hover { color: #dbeae4; background: rgba(90,155,131,.08); }
+.admin-page .admin-tabs button.active { border-color: rgba(78,217,165,.18); color: #f2faf7; background: linear-gradient(110deg,rgba(19,116,84,.32),rgba(22,70,55,.18)); box-shadow: inset 3px 0 #3ed5a0; }
+.admin-page .admin-tabs button.active > b, .admin-page .admin-tabs button.active small { color: #72c9a9; }
+.admin-rail-footer { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 13px 10px 4px; border-top: 1px solid rgba(136,174,160,.12); }
+.admin-rail-footer > span { width: 9px; height: 9px; border-radius: 50%; }
+.admin-rail-footer > span.online { background: #43d6a2; box-shadow: 0 0 0 5px rgba(67,214,162,.08); }
+.admin-rail-footer > span.pending { background: #e9b455; box-shadow: 0 0 0 5px rgba(233,180,85,.08); }
+.admin-rail-footer div { display: grid; gap: 2px; }
+.admin-rail-footer b { color: #c9dbd4; font-size: 10px; }
+.admin-rail-footer small { color: #69857a; font-size: 9px; }
+.admin-command-main { min-width: 0; }
+.admin-command-main .admin-alert { margin: 0 0 14px; border-color: rgba(222,166,61,.25); background: rgba(116,76,11,.2); color: #f1ce89; }
+.admin-page .admin-stats-grid { margin: 0 0 14px; }
+.admin-page .admin-stats-grid > div, .admin-page .admin-health-panel, .admin-page .admin-review-queue, .admin-page .admin-workspace { border-color: rgba(130,171,156,.14); background: rgba(15,31,25,.8); box-shadow: 0 16px 44px rgba(0,0,0,.16); }
+.admin-page .admin-stats-grid span, .admin-page .admin-stats-grid small, .admin-page .admin-section-copy { color: #79958a; }
+.admin-page .admin-stats-grid b, .admin-page h2, .admin-page h3, .admin-page .admin-review-row strong { color: #eff8f4; }
+.admin-page .admin-stats-grid > div { min-height: 118px; }
+.admin-page .readiness-score { color: #48d5a2; }
+.admin-page .admin-service { border-color: rgba(130,171,156,.13); }
+.admin-page .admin-service.healthy { background: rgba(31,113,83,.18); }
+.admin-page .admin-service.blocked { border-color: rgba(214,164,68,.22); background: rgba(100,69,15,.18); }
+.admin-page .admin-service b { color: #dcebe5; }
+.admin-page .admin-service small, .admin-page .admin-review-copy span, .admin-page .admin-review-row small { color: #779186; }
+.admin-page .admin-dataset-row > div { background: #172a23; }
+.admin-page .admin-checklist { background: rgba(44,105,82,.17); }
+.admin-page .admin-checklist p { color: #9db9ae; }
+.admin-page .training-disabled { border-color: rgba(216,177,95,.2); background: rgba(91,63,15,.17); }
+.admin-page .admin-review-row, .admin-page .admin-user-row { border-color: rgba(130,171,156,.12); }
+.admin-page .admin-empty { background: rgba(101,139,125,.08); color: #78958a; }
+
+/* Motion-led authentication surface. */
+.login-shell { grid-template-columns: minmax(400px,.78fr) minmax(520px,1.22fr); background: #07130f; }
+.login-panel { position: relative; z-index: 2; width: min(500px,calc(100% - 56px)); padding: 50px 52px 42px; border: 1px solid rgba(5,81,61,.1); background: linear-gradient(145deg,#f7fbf8,#e8f3ed); box-shadow: 0 28px 90px rgba(0,0,0,.34), 0 1px 0 rgba(255,255,255,.8) inset; }
+.login-panel::before { content: "SECURE WORKSPACE"; position: absolute; top: 18px; right: 22px; color: #729286; font-size: 8px; font-weight: 900; letter-spacing: 1.3px; }
+.login-panel h1 { font-size: clamp(38px,4vw,54px); }
+.login-aside { border-left: 1px solid rgba(151,210,184,.13); background: radial-gradient(circle at 78% 18%,rgba(61,202,148,.16),transparent 24%),linear-gradient(135deg,#073e31,#071914 70%); }
+.login-aside-content { max-width: 620px; }
+.login-aside h2 { font-size: clamp(48px,5vw,76px); letter-spacing: -2px; }
+.login-flow > div { min-height: 74px; align-content: space-between; border-color: rgba(171,225,201,.18); background: rgba(2,28,21,.35); backdrop-filter: blur(10px); }
+.login-flow > div:hover { border-color: rgba(128,226,189,.46); transform: translateY(-3px); }
+.login-flow > div, .email-login input, .email-login-submit, .google-login { transition: transform .2s ease,border-color .2s ease,box-shadow .2s ease,background .2s ease; }
+.email-login input:focus { transform: translateY(-1px); box-shadow: 0 0 0 4px rgba(15,113,82,.1); }
 .login-aside-orb { position: absolute; border: 64px solid rgba(151,210,184,.44); border-radius: 50%; }
 .orb-one { width: min(78vw, 980px); height: min(78vw, 980px); right: -29vw; top: -26vw; }
 .orb-two { width: min(56vw, 710px); height: min(56vw, 710px); right: -18vw; top: -16vw; border-color: rgba(4, 66, 51, .62); }
@@ -2540,6 +2606,11 @@ footer.app-footer {
   .admin-row-actions .btn { flex: 1; }
   .admin-dataset-row { grid-template-columns: 90px 1fr 42px; }
   .admin-dataset-row small { grid-column: 2 / 4; text-align: left; }
+  .admin-console-shell { grid-template-columns: 1fr; }
+  .admin-command-rail { position: static; }
+  .admin-page .admin-tabs { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .admin-page .admin-tabs button { min-width: 0; }
+  .admin-command-bar small { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2554,6 +2625,9 @@ footer.app-footer {
   .admin-tabs { top: 62px; margin-inline: -4px; }
   .admin-tabs button { padding-inline: 13px; }
   .admin-identity { width: 100%; min-width: 0; }
+  .admin-page .admin-tabs { grid-template-columns: 1fr; }
+  .admin-command-bar strong { display: none; }
+  main.admin-page { padding-inline: 14px; }
 }
 
 @media (min-width: 769px) and (max-height: 800px) {

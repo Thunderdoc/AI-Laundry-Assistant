@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
+import { MotionButton, MotionDiv, MotionPanel, Reveal, TextEffect } from "./motion-primitives";
 import "./style.css";
 
 // Vercel and Render are separate deployments. Keep the known production API
@@ -209,10 +210,10 @@ function AuthGate() {
   if (user) return <App user={user} onSignOut={handleSignOut} />;
   return (
     <main className="login-shell">
-      <section className="login-panel" aria-labelledby="login-title">
+      <Reveal className="login-panel" aria-labelledby="login-title">
         <div className="login-brand"><div className="login-mark">🧺</div><span>Laundry<span>AI</span></span></div>
         <p className="login-eyebrow">FABRIC CARE INTELLIGENCE</p>
-        <h1 id="login-title">Welcome back</h1>
+        <h1 id="login-title"><TextEffect>Welcome back</TextEffect></h1>
         <p className="login-copy">Sign in to analyze garments and access your personalized fabric-care guidance.</p>
         {settings === null ? <div className="login-loading">Connecting to secure sign-in…</div> : (
           <>
@@ -226,9 +227,9 @@ function AuthGate() {
               <button className="auth-switch" type="button" onClick={() => setIsRegistering((value) => !value)}>{isRegistering ? "Already have an account? Sign in" : "New here? Create an account"}</button>
               {verificationPending && <button className="auth-switch verification-link" type="button" onClick={handleResendVerification}>Resend verification email</button>}
               <div className="auth-divider"><span>or</span></div>
-              <button className="google-login" onClick={handleGoogleLogin} disabled={isSigningIn}>
+              <MotionButton whileHover={{ y: -2 }} whileTap={{ scale: .985 }} className="google-login" onClick={handleGoogleLogin} disabled={isSigningIn}>
                 <span className="google-g">G</span>Continue with Google
-              </button>
+              </MotionButton>
             </> : <>
               <div className="auth-setup"><strong>Firebase setup pending</strong><br />Email, password and Google sign-in will activate after deployment.</div>
               <button className="email-login-submit guest-entry" type="button" onClick={continueAsGuest}>CONTINUE AS GUEST <span>→</span></button>
@@ -238,19 +239,19 @@ function AuthGate() {
         {authNotice && <p className="login-notice" role="status">{authNotice}</p>}
         {authError && <p className="login-error" role="alert">{authError}</p>}
         <small>Care labels always remain the final authority.</small>
-      </section>
-      <aside className="login-aside">
-        <div className="login-aside-orb orb-one" /><div className="login-aside-orb orb-two" /><div className="login-aside-orb orb-three" />
-        <div className="login-aside-content"><span>SMARTER LAUNDRY</span><h2>Understand the fabric.<br /><i>Care for what matters.</i></h2><p>AI-assisted fabric recognition and clear laundry care advice, all in one place.</p>
+      </Reveal>
+      <Reveal className="login-aside" as="aside" delay={.08}>
+        <MotionDiv className="login-aside-orb orb-one" animate={{ scale: [1, 1.035, 1], rotate: [0, 2, 0] }} transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }} /><MotionDiv className="login-aside-orb orb-two" animate={{ scale: [1.02, 1, 1.02], rotate: [0, -3, 0] }} transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }} /><MotionDiv className="login-aside-orb orb-three" animate={{ y: [0, -13, 0] }} transition={{ duration: 4.5, repeat: Infinity, ease: "easeInOut" }} />
+        <div className="login-aside-content"><span>SMARTER LAUNDRY</span><h2><TextEffect>Understand the fabric.</TextEffect><br /><i>Care for what matters.</i></h2><p>One clear workflow: capture a garment, identify its likely fabric, and act on safer care guidance.</p>
           <div className="login-flow"><div><b>01</b><span>Upload</span></div><div><b>02</b><span>Identify</span></div><div><b>03</b><span>Care</span></div></div>
         </div>
-        <div className="login-aside-footer"><span className="live-dot" /> No external artwork · CSS design</div>
-      </aside>
+        <div className="login-aside-footer"><span className="live-dot" /> Secure authentication · AI-assisted guidance</div>
+      </Reveal>
     </main>
   );
 }
 
-type Page = "home" | "analyze" | "history" | "insights" | "library" | "research" | "admin" | "about";
+type Page = "home" | "analyze" | "insights" | "library" | "admin" | "about";
 
 type Recommendation = {
   wash: { temperature: string; cycle: string; detergent?: string; spin?: string };
@@ -637,24 +638,6 @@ function ConfusionMatrixView({ metrics }: { metrics: any }) {
   );
 }
 
-const LITERATURE_PAPERS = [
-  { id: 1, title: "Deep Learning for Textile Fabric Defect & Category Recognition", authors: "Li et al.", year: "2021", topic: "Computer Vision & Fabric Classification", contribution: "Benchmarked CNN architectures on macro textile surfaces; demonstrated MobileNet efficiency on embedded edge classifiers." },
-  { id: 2, title: "Transfer Learning in Convolutional Neural Networks for Garment Identification", authors: "Rahman & Zhang", year: "2022", topic: "Transfer Learning & Vision", contribution: "Demonstrated that pre-trained ImageNet feature extractors achieve high accuracy on limited textile training samples." },
-  { id: 3, title: "Environmental Life-Cycle Assessment of Household Garment Laundering", authors: "Yates & Jones", year: "2020", topic: "Sustainable Laundering", contribution: "Established that 60%+ of garment lifecycle energy is consumed during domestic washing and thermal drying." },
-  { id: 4, title: "Automated Textile Fiber Classification Using Microscopic & Visual Analysis", authors: "Kumar et al.", year: "2023", topic: "Textile Science", contribution: "Mapped surface weave textures and yarn diameters to mechanical washing stress tolerances." },
-  { id: 5, title: "Microfiber Release from Synthetic Textiles During Domestic Washing", authors: "De Falco et al.", year: "2019", topic: "Microplastic Prevention", contribution: "Proved cold, gentle wash cycles reduce polyester microfiber shedding by up to 50% compared to hot aggressive cycles." },
-  { id: 6, title: "Explainable Computer Vision Models for Consumer Garment Care Assistance", authors: "Martinez & Chen", year: "2024", topic: "Explainable AI (XAI)", contribution: "Identified that presenting confidence thresholds and decision rationale significantly increases user adherence." },
-  { id: 7, title: "MobileNetV2: Inverted Residuals and Linear Bottlenecks", authors: "Sandler et al.", year: "2018", topic: "Deep Learning Architecture", contribution: "Foundation for low-latency, mobile-friendly image classification used in LaundryAI's inference pipeline." },
-  { id: 8, title: "Influence of Washing Temperature and Mechanical Action on Textile Shrinkage", authors: "Smith & Taylor", year: "2021", topic: "Garment Longevity", contribution: "Quantified thermal felting thresholds in wool and shrinkage vectors in woven cellulose fabrics." },
-  { id: 9, title: "Intelligent Laundry Assistance Systems: A Comprehensive Review", authors: "Verma et al.", year: "2023", topic: "IoT & Smart Appliances", contribution: "Explored camera-integrated appliance interfaces and consumer garment-care guidance UX patterns." },
-  { id: 10, title: "Colorfastness and Dye Bleed Prevention in Household Textile Care", authors: "Gomez et al.", year: "2022", topic: "Color Preservation", contribution: "Documented the mechanics of indigo dye loss in denim during high-temperature washing cycles." },
-  { id: 11, title: "Dataset Construction and Annotation for Fabric Texture Recognition", authors: "Tanaka & Sato", year: "2020", topic: "ML Datasets", contribution: "Guidelines for multi-lighting macro textile photography to prevent model overfitting on dye hues." },
-  { id: 12, title: "Sustainable Consumption: Consumer Behavior in Garment Maintenance", authors: "Nielsen & Birtwistle", year: "2019", topic: "Sustainability Science", contribution: "Revealed that unclear care labels are the leading cause of premature garment disposal." },
-  { id: 13, title: "Top-2 Margin and Entropy Gating for Rejecting Out-of-Distribution Inputs", authors: "Hendrycks et al.", year: "2021", topic: "AI Safety & Reliability", contribution: "Theoretical basis for LaundryAI's confidence gate to reject non-fabric images rather than hallucinating labels." },
-  { id: 14, title: "Soft-Computing Decision Engines in Household Automation", authors: "Patel & Rao", year: "2022", topic: "Rule Engines", contribution: "Architected deterministic knowledge graphs that map categorical material inputs to safe action matrices." },
-  { id: 15, title: "Evaluation of Detergent Surfactants on Protein Fibers (Silk and Wool)", authors: "Dubois & Laurent", year: "2023", topic: "Chemical Textile Care", contribution: "Demonstrated enzymatic detergent damage on keratin and sericin structures, informing detergent recommendation rules." }
-];
-
 function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise<void> }) {
   const [page, setPage] = useState<Page>("home");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -667,10 +650,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<Prediction | undefined>();
   const [history, setHistory] = useState<Prediction[]>([]);
-  const [historySearch, setHistorySearch] = useState("");
-  const [historyFilter, setHistoryFilter] = useState<string>("all");
-  const [editingNoteId, setEditingNoteId] = useState<number | string | null>(null);
-  const [editingNoteText, setEditingNoteText] = useState("");
   const [analytics, setAnalytics] = useState<Analytics | undefined>();
   const [datasetStats, setDatasetStats] = useState<DatasetStats | undefined>();
   const [modelMetrics, setModelMetrics] = useState<any>(null);
@@ -683,7 +662,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
   const [compareActive, setCompareActive] = useState(false);
-  const [researchTab, setResearchTab] = useState<string>("problem");
   const [stream, setStream] = useState<MediaStream | undefined>();
   const [cameraFacing, setCameraFacing] = useState<"user" | "environment">("environment");
   const [note, setNote] = useState("");
@@ -1071,33 +1049,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   };
 
 
-  const saveEditedNote = async (id: number | string) => {
-    const trimmed = editingNoteText.trim();
-    if (trimmed.length > NOTE_MAX_LENGTH) {
-      alert(`Note must be ${NOTE_MAX_LENGTH} characters or fewer.`);
-      return;
-    }
-    try {
-      await apiFetch(`${API}/history/${id}/note`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note: trimmed || null })
-      });
-      setEditingNoteId(null);
-      setEditingNoteText("");
-      await load();
-    } catch {
-      alert("Failed to update note. Please try again.");
-    }
-  };
-
-  const clearAllHistory = async () => {
-    if (window.confirm("Are you sure you want to delete all saved analyses? This action cannot be undone.")) {
-      await apiFetch(`${API}/history`, { method: "DELETE" });
-      await load();
-    }
-  };
-
   const nav = (target: Page, label: string) => (
     <button
       className={`nav-link ${page === target ? "active" : ""}`}
@@ -1128,12 +1079,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         <nav className={`main-nav ${mobileNavOpen ? "open" : ""}`}>
           {nav("home", "Home")}
           {nav("analyze", "Analyze")}
-          {nav("history", "History")}
-          {nav("insights", "Insights")}
-          {nav("library", "Fabric Library")}
-          {nav("research", "Research")}
+          {nav("insights", "Model")}
+          {nav("library", "Care Guide")}
           {user.is_admin && nav("admin", "Admin")}
-          {nav("about", "About")}
         </nav>
 
         <button className="header-cta" onClick={() => setPage("analyze")}>
@@ -1152,19 +1100,19 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         <main className="page-container">
           {/* Hero Section */}
           <section className="hero-grid">
-            <div className="hero-left">
+            <Reveal className="hero-left">
               <span className="eyebrow">COMPUTER VISION × TEXTILE SCIENCE</span>
               <h1>
-                See the Fabric. <br />
+                <TextEffect>See the Fabric.</TextEffect> <br />
                 <span className="serif">Understand the Care.</span>
               </h1>
               <p className="lead">
                 AI-powered fabric intelligence that analyzes garment images, estimates the most likely fabric class, and recommends safer, smarter, and more sustainable care.
               </p>
               <div className="hero-actions">
-                <button className="btn btn-primary" onClick={() => setPage("analyze")}>
+                <MotionButton whileHover={{ y: -3 }} whileTap={{ scale: .98 }} className="btn btn-primary" onClick={() => setPage("analyze")}>
                   Analyze a Garment →
-                </button>
+                </MotionButton>
                 <button className="btn btn-secondary" onClick={() => setPage("library")}>
                   Explore Fabric Library
                 </button>
@@ -1172,14 +1120,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               <div className="trust-badge">
                 <span>🛡️ Computer vision assisted</span>
                 <span>•</span>
-                <span>Research-oriented</span>
+                <span>Evidence-led</span>
                 <span>•</span>
                 <span>Care labels authoritative</span>
               </div>
-            </div>
+            </Reveal>
 
             {/* Right Interactive Scanner Simulation */}
-            <div className="hero-right">
+            <Reveal className="hero-right" delay={.12}>
               <div className="scanner-card">
                 <div className="scanner-viewbox">
                   <div className="macro-fabric-bg">
@@ -1196,7 +1144,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   <span style={{ fontSize: "12px", color: "var(--sage)" }}>Quality: Verified</span>
                 </div>
               </div>
-            </div>
+            </Reveal>
           </section>
 
           {/* 5-Step Pipeline Section */}
@@ -1334,7 +1282,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           ======================================================== */}
       {page === "analyze" && (
         <main className="page-container">
-          <div className="analyze-workspace">
+          <Reveal className="analyze-workspace">
             {/* Stepper Header */}
             <div className="workspace-stepper">
               <div className={`step-indicator ${analysisStep === 0 ? "active" : analysisStep > 0 ? "completed" : ""}`}>
@@ -1356,7 +1304,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             {/* STAGE 1 & 2: Workspace Panel */}
             <div className="workspace-panel">
               <span className="eyebrow">GARMENT SCANNER</span>
-              <h2>Scan a Garment</h2>
+              <h2><TextEffect>Scan a Garment</TextEffect></h2>
               <p style={{ color: "var(--text-muted)", marginBottom: "20px" }}>
                 Upload a clear close-up of your garment's fabric surface for classification and care rules.
               </p>
@@ -1989,8 +1937,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                         >
                           {copied ? "✓ Copied to Clipboard!" : "📋 Copy Care Profile"}
                         </button>
-                        <button type="button" className="btn btn-sage" onClick={() => setPage("history")}>
-                          View in History →
+                        <button type="button" className="btn btn-sage" onClick={() => setPage("insights")}>
+                          View model insights →
                         </button>
                         <button
                           type="button"
@@ -2006,175 +1954,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 </div>
               </section>
             )}
-          </div>
-        </main>
-      )}
-
-      {/* ========================================================
-          HISTORY PAGE
-          ======================================================== */}
-      {page === "history" && (
-        <main className="page-container">
-          <div style={{ maxWidth: "980px", margin: "0 auto" }}>
-            <span className="eyebrow">PERSISTED SCANS</span>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
-              <h1>Garment Scan History</h1>
-              <span style={{ color: "var(--text-light)", fontSize: "14px", fontWeight: 600 }}>
-                {history.length} {history.length === 1 ? "record" : "records"} stored
-              </span>
-            </div>
-
-            {/* Toolbar */}
-            <div className="search-toolbar">
-              <input
-                type="search"
-                className="search-input"
-                placeholder="Search history by fabric or care note keyword..."
-                value={historySearch}
-                onChange={(e) => setHistorySearch(e.target.value)}
-              />
-              <div style={{ display: "flex", gap: "8px" }}>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  disabled={!history.length}
-                  onClick={() => window.open(`${API}/history/export/csv`, "_blank")}
-                >
-                  📥 Export CSV
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger btn-sm"
-                  disabled={!history.length}
-                  onClick={clearAllHistory}
-                >
-                  🗑️ Clear All
-                </button>
-              </div>
-            </div>
-
-            {/* Filter Chips */}
-            <div className="tag-container" style={{ marginBottom: "20px" }}>
-              {["all", "high", "medium", "low"].map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  className={`tag-chip ${historyFilter === f ? "active" : ""}`}
-                  style={{
-                    background: historyFilter === f ? "var(--primary)" : "var(--surface)",
-                    color: historyFilter === f ? "#FFFFFF" : "var(--text-main)"
-                  }}
-                  onClick={() => setHistoryFilter(f)}
-                >
-                  {f === "all" ? "All Confidence" : f === "high" ? "High (≥80%)" : f === "medium" ? "Moderate (60–79%)" : "Low (<60%)"}
-                </button>
-              ))}
-            </div>
-
-            {/* History Cards */}
-            {history.length ? (
-              (() => {
-                const filtered = history.filter((entry) => {
-                  const matchSearch =
-                    !historySearch.trim() ||
-                    entry.fabric.toLowerCase().includes(historySearch.toLowerCase()) ||
-                    (entry.note && entry.note.toLowerCase().includes(historySearch.toLowerCase()));
-                  
-                  let matchConfidence = true;
-                  if (historyFilter === "high") matchConfidence = entry.confidence >= 80;
-                  else if (historyFilter === "medium") matchConfidence = entry.confidence >= 60 && entry.confidence < 80;
-                  else if (historyFilter === "low") matchConfidence = entry.confidence < 60;
-
-                  return matchSearch && matchConfidence;
-                });
-
-                if (!filtered.length) {
-                  return (
-                    <div style={{ textAlign: "center", padding: "40px", background: "var(--surface)", borderRadius: "var(--radius-md)", border: "1px solid var(--border)" }}>
-                      <p style={{ color: "var(--text-muted)" }}>No scan history matching your search filters.</p>
-                    </div>
-                  );
-                }
-
-                return filtered.map((entry) => (
-                  <div className="history-card" key={entry.id}>
-                    <div className="history-card-fabric">{entry.fabric}</div>
-                    <div className="history-card-body">
-                      <div className="history-meta-text">
-                        <b>{entry.confidence}% confidence</b> • {new Date(entry.created_at).toLocaleDateString()} at {new Date(entry.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </div>
-
-                      {/* Inline Note Editor */}
-                      {editingNoteId === entry.id ? (
-                        <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "8px" }}>
-                          <input
-                            type="text"
-                            className="text-field"
-                            style={{ minHeight: "auto", padding: "6px 12px", fontSize: "13px" }}
-                            value={editingNoteText}
-                            maxLength={NOTE_MAX_LENGTH}
-                            autoFocus
-                            onChange={(e) => setEditingNoteText(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") void saveEditedNote(entry.id);
-                              if (e.key === "Escape") setEditingNoteId(null);
-                            }}
-                          />
-                          <button type="button" className="btn btn-primary btn-sm" onClick={() => void saveEditedNote(entry.id)}>
-                            Save
-                          </button>
-                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditingNoteId(null)}>
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
-                          {entry.note ? (
-                            <span className="history-note">💬 {entry.note}</span>
-                          ) : (
-                            <span className="history-note empty">No note attached</span>
-                          )}
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm"
-                            style={{ padding: "2px 8px", fontSize: "11px" }}
-                            onClick={() => {
-                              setEditingNoteId(entry.id);
-                              setEditingNoteText(entry.note || "");
-                            }}
-                          >
-                            ✏️ {entry.note ? "Edit" : "Add note"}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm"
-                      style={{ color: "var(--danger)" }}
-                      onClick={async () => {
-                        await apiFetch(`${API}/history/${entry.id}`, { method: "DELETE" });
-                        await load();
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ));
-              })()
-            ) : (
-              <div style={{ textAlign: "center", padding: "60px", background: "var(--surface)", borderRadius: "var(--radius-lg)", border: "1px solid var(--border)" }}>
-                <div style={{ fontSize: "40px", marginBottom: "12px" }}>📂</div>
-                <h3>No Verified Analyses Stored</h3>
-                <p style={{ color: "var(--text-muted)", marginTop: "6px", marginBottom: "18px" }}>
-                  Run your first garment scan to record fabric predictions and customized care profiles.
-                </p>
-                <button className="btn btn-primary" onClick={() => setPage("analyze")}>
-                  Analyze a Garment Now
-                </button>
-              </div>
-            )}
-          </div>
+          </Reveal>
         </main>
       )}
 
@@ -2183,8 +1963,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           ======================================================== */}
       {page === "insights" && (
         <main className="page-container">
+          <Reveal>
           <span className="eyebrow">MODEL METRICS & USAGE</span>
-          <h1>System Insights & Analytics</h1>
+          <h1><TextEffect>Model performance, made clear.</TextEffect></h1>
           <p style={{ color: "var(--text-muted)", marginBottom: "32px" }}>
             Real data-derived statistics from verified garment classifications and active learning dataset growth.
           </p>
@@ -2293,6 +2074,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               <ConfusionMatrixView metrics={modelMetrics} />
             </div>
           )}
+          </Reveal>
         </main>
       )}
 
@@ -2301,17 +2083,20 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           ======================================================== */}
       {page === "library" && (
         <main className="page-container">
+          <Reveal>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
             <div>
               <span className="eyebrow">TEXTILE KNOWLEDGE BASE</span>
-              <h1>Fabric Care Library</h1>
+              <h1><TextEffect>Fabric care, without guesswork.</TextEffect></h1>
             </div>
-            <button
+            <MotionButton
+              whileHover={{ y: -2 }}
+              whileTap={{ scale: .985 }}
               className="btn btn-secondary"
               onClick={() => setCompareActive(!compareActive)}
             >
               {compareActive ? "View Single Fabric" : "📊 Compare All Fabrics"}
-            </button>
+            </MotionButton>
           </div>
 
           {/* Comparison Matrix View */}
@@ -2421,323 +2206,32 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               })()}
             </div>
           )}
-        </main>
-      )}
-
-      {/* ========================================================
-          RESEARCH HUB (12 ACADEMIC SECTIONS FOR VIVA/PRESENTATION)
-          ======================================================== */}
-      {page === "research" && (
-        <main className="page-container">
-          <span className="eyebrow">ACADEMIC & SCIENTIFIC FOUNDATION</span>
-          <h1>Research & System Architecture</h1>
-          <p style={{ color: "var(--text-muted)", marginBottom: "36px" }}>
-            Comprehensive documentation of the theoretical framework, literature survey, dataset, and algorithm for LaundryAI.
-          </p>
-
-          <div className="research-layout">
-            {/* Sidebar Tabs */}
-            <div className="research-sidebar">
-              {[
-                ["problem", "01 Problem Statement"],
-                ["objectives", "02 Objectives"],
-                ["literature", "03 Literature Survey"],
-                ["gap", "04 Research Gap"],
-                ["methodology", "05 Methodology"],
-                ["architecture", "06 Architecture Diagram"],
-                ["algorithm", "07 Algorithm Pseudocode"],
-                ["dataset", "08 Dataset & Split"],
-                ["model", "09 MobileNetV2 Model"],
-                ["evaluation", "10 Evaluation & Metrics"],
-                ["limitations", "11 Limitations"],
-                ["references", "12 References"]
-              ].map(([key, label]) => (
-                <button
-                  key={key}
-                  className={`research-tab-btn ${researchTab === key ? "active" : ""}`}
-                  onClick={() => setResearchTab(key)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {/* Article Content */}
-            <div className="research-article">
-              {researchTab === "problem" && (
-                <div>
-                  <span className="eyebrow">SECTION 01</span>
-                  <h2>Problem Statement</h2>
-                  <p>
-                    Incorrect domestic garment laundering contributes substantially to fabric degradation, color fading, shrinkage, and excessive environmental resource consumption (water, electricity, and microfiber pollution).
-                  </p>
-                  <p>
-                    Consumers frequently lack material-specific guidance when manufacturer care labels are faded, excised, or ambiguous. LaundryAI investigates an image-based, explainable computer vision workflow to classify fabric types and synthesize safe, lower-impact care advice.
-                  </p>
-                </div>
-              )}
-
-              {researchTab === "objectives" && (
-                <div>
-                  <span className="eyebrow">SECTION 02</span>
-                  <h2>Project Objectives</h2>
-                  <ul style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px" }}>
-                    <li>Develop a lightweight convolutional neural network using MobileNetV2 transfer learning to classify garment fabric macro-surfaces into 5 primary classes (Cotton, Polyester, Denim, Wool, Silk) plus explicit non-fabric rejection.</li>
-                    <li>Implement client and server-side image quality gates (resolution, lighting, texture check) to validate input feasibility before classification.</li>
-                    <li>Enforce top-2 decision margin and confidence gating (≥70% certainty, ≥20% margin) to prevent hallucinated predictions on out-of-distribution inputs.</li>
-                    <li>Construct a deterministic textile knowledge rule engine mapping classified fibers to safe washing temperatures, cycle speeds, drying methods, and ironing parameters.</li>
-                    <li>Integrate an active learning feedback loop where user confirmations automatically expand the classified dataset for continuous retraining.</li>
-                    <li>Provide eco-optimized laundering recommendations that encourage lower-temperature washing and air drying to reduce household carbon footprints.</li>
-                  </ul>
-                </div>
-              )}
-
-              {researchTab === "literature" && (
-                <div>
-                  <span className="eyebrow">SECTION 03</span>
-                  <h2>Literature Survey (15 Reviewed Papers)</h2>
-                  <p>A synthesis of foundation research across Computer Vision, Textile Classification, and Sustainable Laundering:</p>
-                  <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginTop: "20px" }}>
-                    {LITERATURE_PAPERS.map((paper) => (
-                      <div key={paper.id} style={{ background: "var(--surface-card)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", padding: "16px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                          <b style={{ color: "var(--primary)", fontSize: "15px" }}>[{paper.id}] {paper.title}</b>
-                          <span style={{ fontSize: "12px", color: "var(--text-light)" }}>{paper.year}</span>
-                        </div>
-                        <div style={{ fontSize: "13px", color: "var(--text-muted)", margin: "4px 0" }}>
-                          Authors: {paper.authors} • Topic: <i>{paper.topic}</i>
-                        </div>
-                        <p style={{ fontSize: "13.5px", color: "var(--text-main)", margin: "6px 0 0" }}>
-                          <b>Influence on LaundryAI:</b> {paper.contribution}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {researchTab === "gap" && (
-                <div>
-                  <span className="eyebrow">SECTION 04</span>
-                  <h2>Research Gap</h2>
-                  <p>
-                    Existing research addresses isolated domains such as textile microscopic inspection, industrial defect detection, or general garment category classification independently.
-                  </p>
-                  <p>
-                    LaundryAI bridges this gap by creating an integrated, consumer-accessible workflow connecting non-microscopic visual fabric surface classification with deterministic textile science rules, active learning dataset feedback, and sustainability guidance.
-                  </p>
-                </div>
-              )}
-
-              {researchTab === "methodology" && (
-                <div>
-                  <span className="eyebrow">SECTION 05</span>
-                  <h2>System Methodology</h2>
-                  <p>The system operates in four cohesive functional tiers:</p>
-                  <ol style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px" }}>
-                    <li><b>Data Collection & Preprocessing:</b> Curating standardized macro-textile datasets across 6 categories (cotton, polyester, denim, wool, silk, non_fabric) with 224×224 normalization.</li>
-                    <li><b>Model Training:</b> Transfer learning from MobileNetV2 with initial feature freezing, followed by full fine-tuning with AdamW and learning rate scheduling.</li>
-                    <li><b>Decision Gating:</b> Inference requires satisfying both confidence (≥0.70) and top-2 probability margin (≥0.20) thresholds to avoid false positives.</li>
-                    <li><b>Rule Synthesis & Active Learning:</b> Deterministic knowledge mapping provides verified care parameters, while human confirmations route images into verified training folders for scheduled retraining.</li>
-                  </ol>
-                </div>
-              )}
-
-              {researchTab === "architecture" && (
-                <div>
-                  <span className="eyebrow">SECTION 06</span>
-                  <h2>System Architecture</h2>
-                  <pre className="code-block">
-{`+-------------------------------------------------------------------------+
-|                              USER CLIENT                                |
-|        React / TypeScript / HTML5 Canvas Image Pre-Flight Check         |
-+------------------------------------+------------------------------------+
-                                     |  Multipart (Image + Context Note)
-                                     v
-+-------------------------------------------------------------------------+
-|                           FASTAPI BACKEND                               |
-|  - MIME & Size Validation (<= 10MB)                                      |
-|  - Server-side Preprocessing (224x224, ImageNet Mean/Std Normalization) |
-+------------------------------------+------------------------------------+
-                                     |  PyTorch Tensor [1, 3, 224, 224]
-                                     v
-+-------------------------------------------------------------------------+
-|                  MOBILENETV2 TORCHSCRIPT CLASSIFIER                     |
-|  - Feature Extraction (Inverted Residuals)                              |
-|  - Global Average Pooling -> Linear (6 Classes) -> Softmax Probabilities|
-+------------------------------------+------------------------------------+
-                                     |  Ranked Probabilities
-                                     v
-+-------------------------------------------------------------------------+
-|                  CONFIDENCE & MARGIN DECISION GATES                     |
-|  - Confidence >= min_confidence (70%)                                   |
-|  - Top1 - Top2 Margin >= min_margin (20%)                               |
-|  - Non-Fabric Rejection -> 'unknown' fallback                           |
-+------------------------------------+------------------------------------+
-                                     |  Verified Fabric Label
-                                     v
-+-------------------------------------------------------------------------+
-|                   FABRIC CARE KNOWLEDGE BASE ENGINE                     |
-|  - Washing Temperature & Mechanical Cycle                               |
-|  - Drying Method & Ironing Temperature Guidance                         |
-|  - Detergent Formula & Bleach Avoidance                                 |
-|  - Potential Eco-Friendly Laundering Practices                          |
-+------------------------------------+------------------------------------+
-                                     |  User Confirmation
-                                     v
-+-------------------------------------------------------------------------+
-|                ACTIVE LEARNING & DATASET AUGMENTATION                   |
-|  - Human Verification routes image into data/train/<fabric>/            |
-|  - Continuous training corpus expansion for scheduled fine-tuning      |
-+-------------------------------------------------------------------------+`}
-                  </pre>
-                </div>
-              )}
-
-              {researchTab === "algorithm" && (
-                <div>
-                  <span className="eyebrow">SECTION 07</span>
-                  <h2>Algorithm: AI Fabric Classification & Care Recommendation</h2>
-                  <pre className="code-block">
-{`Algorithm 1: Fabric Classification and Care Profile Synthesis
-Input: Garment Image I, Optional Context Note N
-Output: Fabric Class F, Confidence C, Care Recommendation R
-
-1:  Validate MIME_TYPE(I) in {JPEG, PNG, WEBP} and SIZE(I) <= 10 MB
-2:  Extract client quality metrics: resolution (W, H), brightness (B)
-3:  Resize image I to 224 x 224 pixels
-4:  Normalize pixel tensor: T = (I/255.0 - Mean) / Std
-5:  Pass T through MobileNetV2: Logits = Model(T)
-6:  Calculate Softmax Probabilities: P = Softmax(Logits)
-7:  Rank classes: [(c_1, p_1), (c_2, p_2), ..., (c_k, p_k)] in descending order
-8:  Set Fabric = c_1, Confidence C = p_1, Margin M = p_1 - p_2
-9:  If C < Theta_conf OR M < Theta_margin:
-10:     Decision = "unknown", Reason = "Confidence or top-2 margin below threshold"
-11:     R = NULL
-12: Else if Fabric == "non_fabric":
-13:     Decision = "non_fabric", Reason = "Detected non-garment image"
-14:     R = NULL
-15: Else:
-16:     Decision = Fabric
-17:     Retrieve Knowledge Base Record: KB = FABRICS[Fabric]
-18:     Generate R = {Wash: KB.wash, Dry: KB.dry, Iron: KB.iron, Bleach: KB.bleach, Eco: KB.eco}
-19: End If
-20: Store JSON record {ID, Date, Decision, C, N, R} in SQLite predictions table
-21: If User_Confirmation(C_user) is received:
-22:     Save Image I to data/train/C_user/user_<timestamp>.jpg
-23: End If
-24: Return Response to Client`}
-                  </pre>
-                </div>
-              )}
-
-              {researchTab === "dataset" && (
-                <div>
-                  <span className="eyebrow">SECTION 08</span>
-                  <h2>Dataset Specifications & Split</h2>
-                  <p>Standardized image folder dataset with 6 mutually exclusive classes:</p>
-                  <ul style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px" }}>
-                    <li><b>Classes:</b> <code>cotton</code>, <code>polyester</code>, <code>denim</code>, <code>wool</code>, <code>silk</code>, <code>non_fabric</code></li>
-                    <li><b>Split Ratio:</b> 70% Train, 15% Validation, 15% Test</li>
-                    <li><b>Input Dimensions:</b> 224 × 224 × 3 RGB</li>
-                    <li><b>Augmentations:</b> RandomResizedCrop (scale 0.75–1.0), RandomHorizontalFlip (p=0.5), ColorJitter (brightness 0.15, contrast 0.15, saturation 0.10, hue 0.03)</li>
-                  </ul>
-                </div>
-              )}
-
-              {researchTab === "model" && (
-                <div>
-                  <span className="eyebrow">SECTION 09</span>
-                  <h2>Model Architecture</h2>
-                  <p>MobileNetV2 transfer learning with inverted residual bottlenecks:</p>
-                  <ul style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px" }}>
-                    <li><b>Base Feature Extractor:</b> MobileNetV2 (Pre-trained on ImageNet-1K)</li>
-                    <li><b>Pooling Layer:</b> Adaptive Global Average Pooling (1280 channels)</li>
-                    <li><b>Classifier Head:</b> Linear layer mapping 1280 features to 6 output logits with Label Smoothing (0.05)</li>
-                    <li><b>Optimizer:</b> AdamW (Weight Decay 1e-4) with ReduceLROnPlateau scheduler</li>
-                    <li><b>Export Format:</b> TorchScript JIT (<code>fabric_mobilenetv2.pt</code>) for high-performance CPU/edge inference</li>
-                  </ul>
-                </div>
-              )}
-
-              {researchTab === "evaluation" && (
-                <div>
-                  <span className="eyebrow">SECTION 10</span>
-                  <h2>Evaluation & Measured Metrics</h2>
-                  <p>Measured model evaluation metrics from exported manifest on held-out test data:</p>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", marginTop: "16px" }}>
-                    <div className="kpi-card">
-                      <div className="kpi-label">Validation Accuracy</div>
-                      <div className="kpi-value" style={{ fontSize: "28px" }}>81.9%</div>
-                    </div>
-                    <div className="kpi-card">
-                      <div className="kpi-label">Test Accuracy</div>
-                      <div className="kpi-value" style={{ fontSize: "28px" }}>79.4%</div>
-                    </div>
-                    <div className="kpi-card">
-                      <div className="kpi-label">Min Confidence Gate</div>
-                      <div className="kpi-value" style={{ fontSize: "28px" }}>70.0%</div>
-                    </div>
-                    <div className="kpi-card">
-                      <div className="kpi-label">Min Top-2 Margin</div>
-                      <div className="kpi-value" style={{ fontSize: "28px" }}>20.0%</div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {researchTab === "limitations" && (
-                <div>
-                  <span className="eyebrow">SECTION 11</span>
-                  <h2>Limitations & Future Scope</h2>
-                  <p><b>Current Limitations:</b></p>
-                  <ul style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px", marginBottom: "16px" }}>
-                    <li>Visual classification alone cannot confirm exact synthetic-natural blend ratios (e.g., 65% Cotton / 35% Polyester).</li>
-                    <li>Severe under-lighting or heavy garment patterning may degrade texture extraction.</li>
-                  </ul>
-                  <p><b>Future Scope:</b></p>
-                  <ul style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px" }}>
-                    <li>Phase 2: Care-label symbol OCR scanner comparing manufacturer tags against predicted textile profiles.</li>
-                    <li>Multi-label regression for mixed textile percentage detection.</li>
-                    <li>Integration with smart domestic laundry appliances via IoT APIs.</li>
-                  </ul>
-                </div>
-              )}
-
-              {researchTab === "references" && (
-                <div>
-                  <span className="eyebrow">SECTION 12</span>
-                  <h2>Academic References</h2>
-                  <ol style={{ lineHeight: "1.8", color: "var(--text-muted)", paddingLeft: "20px" }}>
-                    {LITERATURE_PAPERS.map((p) => (
-                      <li key={p.id} style={{ marginBottom: "8px" }}>
-                        {p.authors} ({p.year}). <i>"{p.title}"</i>.
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              )}
-            </div>
-          </div>
+          </Reveal>
         </main>
       )}
 
       {page === "admin" && user.is_admin && (
         <main className="page-container admin-page">
+          <div className="admin-command-bar"><span><i /> Control center</span><small>Protected workspace</small><strong>{adminOverview?.model_ready ? "All inference systems online" : "Loading service status"}</strong></div>
           <section className="admin-hero">
             <div>
-              <span className="eyebrow">LAUNDRYAI CONTROL CENTER</span>
-              <h1>Operate the product with evidence.</h1>
-              <p>Monitor infrastructure, review training evidence, manage access, and prepare safer model releases without pretending a web server is a GPU training platform.</p>
+              <span className="eyebrow">OPERATIONS / LIVE ENVIRONMENT</span>
+              <h1><TextEffect>Command LaundryAI.</TextEffect></h1>
+              <p>One protected workspace for service health, user access, reviewed training evidence, and controlled model releases.</p>
             </div>
             <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>{adminLastUpdated ? `Updated ${adminLastUpdated}` : "Loading live data"}</small><button type="button" onClick={() => setAdminRefreshKey((value) => value+1)}>↻ Refresh data</button></div>
           </section>
 
-          {adminMessage && <div className="admin-alert">{adminMessage}</div>}
-
-          <nav className="admin-tabs" aria-label="Admin operations">
-            {([['overview','Operations'],['feedback',`Review queue (${adminFeedback.length})`],['users',`Users (${adminUsers.length})`],['model','Model release']] as const).map(([key,label]) => <button type="button" key={key} className={adminTab===key ? "active" : ""} onClick={() => setAdminTab(key)}>{label}</button>)}
-          </nav>
+          <div className="admin-console-shell">
+            <aside className="admin-command-rail">
+              <div className="admin-rail-heading"><span>Workspace</span><small>Choose an operational area</small></div>
+              <nav className="admin-tabs" aria-label="Admin operations">
+                {([['overview','Operations','Live service health'],['feedback',`Review queue · ${adminFeedback.length}`,'Validate corrections'],['users',`Users · ${adminUsers.length}`,'Roles and access'],['model','Model release','Train, evaluate, promote']] as const).map(([key,label,description], index) => <button type="button" key={key} className={adminTab===key ? "active" : ""} onClick={() => setAdminTab(key)}><b>0{index+1}</b><span>{label}<small>{description}</small></span></button>)}
+              </nav>
+              <div className="admin-rail-footer"><span className={adminOverview?.model_ready ? "online" : "pending"} /><div><b>Inference API</b><small>{adminOverview?.model_ready ? "Operational" : "Checking connection"}</small></div></div>
+            </aside>
+            <MotionPanel panelKey={adminTab} className="admin-command-main">
+              {adminMessage && <div className="admin-alert">{adminMessage}</div>}
 
           {adminTab === "overview" && <>
           <section className="admin-stats-grid">
@@ -2786,12 +2280,12 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
           {adminTab === "model" &&
           <section className="admin-workspace">
             <div>
-              <span className="eyebrow">ACTIVE LEARNING</span>
-              <h2>Candidate training pipeline</h2>
-              <p>Review labels here, export approved images, train on a GPU workstation, and deploy only a candidate that passes held-out accuracy, macro-F1, recall, latency, and regression gates.</p>
+              <span className="eyebrow">MODEL DELIVERY / {String(adminOverview?.training_mode || "checking").replace(/_/g," ")}</span>
+              <h2>GPU training and controlled release</h2>
+              <p>Approved feedback becomes a versioned dataset. Training runs on a dedicated GPU worker, while Render keeps the current model online until the candidate passes accuracy, macro-F1, recall, latency, and regression gates.</p>
               {adminOverview?.training_available ? <button className="btn btn-primary" type="button" onClick={async () => {
-                if (!window.confirm("Start model retraining from reviewed feedback?")) return;
-                setAdminMessage("Starting retraining…");
+                if (!window.confirm("Dispatch GPU training from approved feedback?")) return;
+                setAdminMessage("Dispatching the reviewed dataset to the training worker…");
                 try {
                   const response = await apiFetch(`${API}/retrain`, { method: "POST" });
                   const data = await response.json();
@@ -2801,8 +2295,9 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
                 } catch (error) {
                   setAdminMessage(error instanceof Error ? error.message : "Could not start retraining.");
                 }
-              }}>Start reviewed retraining</button> : <div className="training-disabled"><b>Web retraining intentionally off</b><span>Render serves predictions. It should not train a MobileNet model inside a 512 MB web process.</span><code>python backend/scripts/export_approved_feedback.py --output data/train</code><code>python backend/scripts/train.py --data data --epochs 20</code></div>}
+              }}>{adminOverview?.training_mode === "external_gpu" ? "Dispatch GPU training" : "Start reviewed training"}</button> : <div className="training-disabled"><b>GPU worker is not connected yet</b><span>Render remains the inference API. Configure a private training worker webhook to activate one-click training without exposing cloud credentials.</span><code>EXTERNAL_TRAINING_URL=https://your-gpu-worker.example/jobs</code><code>EXTERNAL_TRAINING_TOKEN=server-to-server-secret</code><code>TRAINING_CALLBACK_TOKEN=separate-callback-secret</code></div>}
               {adminOverview?.retraining?.status === "running" && <p className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</p>}
+              {adminOverview?.retraining?.status === "completed" && <p className="admin-live-status"><span className="live-dot" /> Candidate ready. Review its metrics before promotion.</p>}
             </div>
             <div className="admin-checklist">
               <h3>Before deployment</h3>
@@ -2883,6 +2378,8 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
               </article>
             )) : <p className="admin-empty">No Firebase users could be loaded.</p>}
           </section>}
+            </MotionPanel>
+          </div>
         </main>
       )}
 
@@ -2891,9 +2388,10 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
           ======================================================== */}
       {page === "about" && (
         <main className="page-container">
+          <Reveal>
           <div style={{ maxWidth: "840px", margin: "0 auto" }}>
             <span className="eyebrow">ABOUT THE PLATFORM</span>
-            <h1>About LaundryAI</h1>
+            <h1><TextEffect>Built for clearer garment care.</TextEffect></h1>
             <p style={{ color: "var(--text-muted)", fontSize: "17px", lineHeight: "1.6", marginBottom: "28px" }}>
               LaundryAI is an AI-powered textile intelligence system developed to bridge computer vision with household fabric care and environmental sustainability.
             </p>
@@ -2931,6 +2429,7 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
               </p>
             </div>
           </div>
+          </Reveal>
         </main>
       )}
 
@@ -2944,19 +2443,17 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
           <div className="footer-col">
             <h4>Platform</h4>
             <ul className="footer-links">
+              <li><button type="button" onClick={() => setPage("home")}>Home</button></li>
               <li><button type="button" onClick={() => setPage("analyze")}>Analyze Garment</button></li>
-              <li><button type="button" onClick={() => setPage("history")}>Scan History</button></li>
-              <li><button type="button" onClick={() => setPage("insights")}>Model Insights</button></li>
-              <li><button type="button" onClick={() => setPage("library")}>Fabric Library</button></li>
+              <li><button type="button" onClick={() => setPage("insights")}>Model Transparency</button></li>
+              <li><button type="button" onClick={() => setPage("library")}>Fabric Care Guide</button></li>
             </ul>
           </div>
           <div className="footer-col">
-            <h4>Research</h4>
+            <h4>System</h4>
             <ul className="footer-links">
-              <li><button type="button" onClick={() => { setResearchTab("problem"); setPage("research"); }}>Problem Statement</button></li>
-              <li><button type="button" onClick={() => { setResearchTab("literature"); setPage("research"); }}>Literature Survey</button></li>
-              <li><button type="button" onClick={() => { setResearchTab("architecture"); setPage("research"); }}>Architecture</button></li>
-              <li><button type="button" onClick={() => { setResearchTab("algorithm"); setPage("research"); }}>Algorithm</button></li>
+              <li><button type="button" onClick={() => setPage("about")}>How it works</button></li>
+              {user.is_admin && <li><button type="button" onClick={() => setPage("admin")}>Admin operations</button></li>}
             </ul>
           </div>
           <div className="footer-col">

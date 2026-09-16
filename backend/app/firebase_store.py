@@ -94,6 +94,24 @@ def status(probe: bool = False) -> dict[str, Any]:
     return state
 
 
+def training_export_reference() -> dict[str, Any]:
+    """Return a non-secret pointer an authorized GPU worker can resolve.
+
+    The worker receives its own least-privilege cloud credentials; the API
+    never sends the Firebase service-account private key in a job payload.
+    """
+    if configured():
+        return {
+            "provider": "firebase-storage",
+            "bucket": _value("FIREBASE_STORAGE_BUCKET"),
+            "prefix": "training-approved/",
+            "portable": True,
+        }
+    # Do not disclose an absolute server filesystem path. An external worker
+    # cannot resolve Render's ephemeral local disk anyway.
+    return {"provider": "local", "path": "data", "portable": False}
+
+
 def create_prediction(owner_uid: str, record: dict[str, Any], jpeg: bytes) -> dict[str, Any]:
     record_id = uuid.uuid4().hex
     storage_path = f"private-uploads/{owner_uid}/{record_id}.jpg"

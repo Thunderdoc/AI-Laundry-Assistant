@@ -1,0 +1,10 @@
+{
+  "name": "LaundryAI",
+  "short_name": "LaundryAI",
+  "description": "AI-assisted fabric identification and garment care guidance.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7faf8",
+  "theme_color": "#075c48",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

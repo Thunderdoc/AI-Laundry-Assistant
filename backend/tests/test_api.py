@@ -327,5 +327,83 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertIn(f"feedback/{result['id']}", updates)
         self.assertIn("predictions/prediction-1/user_feedback", updates)
 
+    def test_19_training_callback_is_token_and_job_bound(self):
+        from app import main
+        original=dict(main.RETRAIN_STATE)
+        try:
+            main.RETRAIN_STATE.clear()
+            main.RETRAIN_STATE.update({
+                "status":"running", "job_id":"job-123", "mode":"external_gpu",
+                "started_at":"2026-01-01T00:00:00Z", "completed_at":None,
+                "message":"running",
+            })
+            with patch.dict(os.environ,{"TRAINING_CALLBACK_TOKEN":"callback-secret"}):
+                rejected=self.client.post("/api/training/callback",json={"status":"completed","job_id":"job-123"})
+                self.assertEqual(rejected.status_code,401)
+
+                mismatch=self.client.post(
+                    "/api/training/callback",
+                    headers={"x-training-token":"callback-secret"},
+                    json={"status":"completed","job_id":"another-job","metrics":{"test_accuracy":0.9}},
+                )
+                self.assertEqual(mismatch.status_code,409)
+
+                completed=self.client.post(
+                    "/api/training/callback",
+                    headers={"x-training-token":"callback-secret"},
+                    json={
+                        "status":"completed", "job_id":"job-123",
+                        "message":"do not expose worker internals",
+                        "candidate_url":"https://artifacts.example/candidate.pt?temporary_secret=hidden",
+                        "metrics":{"test_accuracy":0.91},
+                    },
+                )
+                self.assertEqual(completed.status_code,200)
+                self.assertEqual(main.RETRAIN_STATE["status"],"completed")
+                self.assertEqual(main.RETRAIN_STATE["metrics"]["test_accuracy"],0.91)
+                self.assertEqual(main.RETRAIN_STATE["candidate_url"],"https://artifacts.example/candidate.pt")
+                self.assertNotIn("worker internals",main.RETRAIN_STATE["message"])
+
+                replay=self.client.post(
+                    "/api/training/callback",
+                    headers={"x-training-token":"callback-secret"},
+                    json={"status":"running","job_id":"job-123"},
+                )
+                self.assertEqual(replay.status_code,409)
+        finally:
+            main.RETRAIN_STATE.clear()
+            main.RETRAIN_STATE.update(original)
+
+    def test_20_training_configuration_and_accelerator_contract(self):
+        from app import main, firebase_store
+        capability=main.local_accelerator_capability()
+        self.assertIn("torch_available",capability)
+        self.assertIn("cuda_available",capability)
+        self.assertIn("device_count",capability)
+        self.assertIn("device",capability)
+
+        external_env={
+            "EXTERNAL_TRAINING_URL":"https://gpu.example/jobs",
+            "PUBLIC_API_URL":"https://api.example",
+            "TRAINING_CALLBACK_TOKEN":"callback-secret",
+            "ENABLE_RETRAINING":"false",
+        }
+        with patch.dict(os.environ,external_env), patch.object(
+            firebase_store,"training_export_reference",
+            return_value={"provider":"firebase-storage","bucket":"test-bucket","prefix":"training-approved/","portable":True},
+        ):
+            config=main.training_configuration()
+        self.assertEqual(config["mode"],"external_gpu")
+        self.assertTrue(config["available"])
+        self.assertEqual(config["missing"],[])
+
+        with patch.dict(os.environ,{**external_env,"TRAINING_CALLBACK_TOKEN":""}), patch.object(
+            firebase_store,"training_export_reference",
+            return_value={"provider":"firebase-storage","portable":True},
+        ):
+            incomplete=main.training_configuration()
+        self.assertFalse(incomplete["available"])
+        self.assertIn("TRAINING_CALLBACK_TOKEN",incomplete["missing"])
+
 if __name__ == "__main__":
     unittest.main()

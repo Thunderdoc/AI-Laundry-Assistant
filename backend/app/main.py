@@ -1,10 +1,12 @@
 import csv, io, json, os, shutil, sqlite3, threading, time, uuid, warnings
+from urllib import request as urlrequest
+from urllib.parse import urlsplit, urlunsplit
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Body, Response, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -76,6 +78,13 @@ class AdminRoleUpdate(BaseModel):
 class UserStatusUpdate(BaseModel):
     disabled: bool
 
+class TrainingCallback(BaseModel):
+    status: Literal["queued", "running", "completed", "failed"]
+    message: str = Field(default="", max_length=500)
+    job_id: Optional[str] = Field(default=None, max_length=160)
+    candidate_url: Optional[str] = Field(default=None, max_length=2000)
+    metrics: Optional[dict] = None
+
 def firebase_auth_enabled() -> bool:
     """Token verification needs the Firebase project identity, not a private key."""
     return all(FIREBASE_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId"))
@@ -134,7 +143,9 @@ def firebase_admin_auth_client():
 @app.middleware("http")
 async def require_firebase_auth(request: Request, call_next):
     path = request.url.path
-    public_api = {"/api/health", "/api/auth/config", "/api/auth/firebase"}
+    # GPU workers authenticate callbacks with the dedicated training token;
+    # requiring an end-user Firebase token here would make callbacks impossible.
+    public_api = {"/api/health", "/api/auth/config", "/api/auth/firebase", "/api/training/callback"}
     if request.method != "OPTIONS" and firebase_auth_enabled() and path.startswith("/api/") and path not in public_api:
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
@@ -623,6 +634,7 @@ def analytics(request: Request):
 def admin_overview(request: Request):
     admin = require_admin(request)
     state=model_status()
+    training=training_configuration()
     persistence=firebase_store.status(probe=True)
     warnings_list=[]
     try:
@@ -654,9 +666,10 @@ def admin_overview(request: Request):
             "test_images":manifest.get("test_images"),
             "version":manifest.get("model_version") or manifest.get("version") or "deployed",
         },
-        "retraining": RETRAIN_STATE,
-        "training_available": training_available(),
-        "training_mode":"offline_gpu_recommended",
+        "retraining": _training_state(),
+        "training_available": training["available"],
+        "training_mode":training["mode"],
+        "training_configuration":training,
         "warnings":warnings_list,
     }
 
@@ -842,61 +855,224 @@ RETRAIN_STATE = {
     "status": "idle",
     "started_at": None,
     "completed_at": None,
-    "message": "Ready to train on active learning dataset."
+    "message": "Ready to train on the reviewed dataset.",
+    "job_id": None,
+    "request_id": None,
+    "mode": "review_only",
 }
+_retrain_lock = threading.Lock()
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def _split_image_counts() -> dict[str, int]:
+    extensions={".jpg", ".jpeg", ".png", ".webp"}
+    counts={}
+    for split in ("train", "val", "test"):
+        root=os.path.join(DATA_DIR,split)
+        counts[split]=sum(
+            1 for folder, _, files in os.walk(root)
+            for filename in files if os.path.splitext(filename)[1].lower() in extensions
+        ) if os.path.isdir(root) else 0
+    return counts
+
+def local_accelerator_capability() -> dict:
+    """Return operational accelerator facts without exposing host identifiers."""
+    capability={"runtime":"python", "torch_available":False, "cuda_available":False, "device_count":0}
+    try:
+        import torch
+        capability["torch_available"]=True
+        capability["torch_version"]=str(torch.__version__).split("+")[0]
+        capability["cuda_available"]=bool(torch.cuda.is_available())
+        capability["device_count"]=int(torch.cuda.device_count()) if capability["cuda_available"] else 0
+        capability["cuda_runtime"]=str(torch.version.cuda) if torch.version.cuda else None
+        if capability["device_count"]:
+            properties=torch.cuda.get_device_properties(0)
+            capability["device"]={
+                "type":"cuda",
+                "name":str(properties.name)[:120],
+                "memory_gb":round(int(properties.total_memory)/(1024**3),1),
+            }
+        else:
+            capability["device"]={"type":"cpu"}
+    except Exception as exc:
+        capability["error_type"]=type(exc).__name__
+        capability["device"]={"type":"cpu"}
+    return capability
+
+def training_configuration() -> dict:
+    external_url=os.getenv("EXTERNAL_TRAINING_URL", "").strip()
+    callback_base=os.getenv("PUBLIC_API_URL", "").strip().rstrip("/")
+    callback_token=bool(os.getenv("TRAINING_CALLBACK_TOKEN", "").strip())
+    local_enabled=os.getenv("ENABLE_RETRAINING", "false").strip().lower()=="true"
+    split_counts=_split_image_counts()
+    dataset_ready=all(split_counts[split] > 0 for split in ("train", "val", "test"))
+    accelerator=local_accelerator_capability()
+
+    if external_url:
+        export=firebase_store.training_export_reference()
+        missing=[]
+        if not callback_base: missing.append("PUBLIC_API_URL")
+        if not callback_token: missing.append("TRAINING_CALLBACK_TOKEN")
+        if not export.get("portable"): missing.append("portable_dataset_storage")
+        return {
+            "mode":"external_gpu", "available":not missing, "configured":True,
+            "missing":missing, "dataset_ready":bool(export.get("portable")),
+            "split_counts":split_counts, "accelerator":accelerator,
+        }
+    if local_enabled:
+        return {
+            "mode":"local_cuda" if accelerator["cuda_available"] else "local_cpu",
+            "available":dataset_ready, "configured":True,
+            "missing":[] if dataset_ready else [f"{name}_dataset" for name,count in split_counts.items() if count == 0],
+            "dataset_ready":dataset_ready, "split_counts":split_counts, "accelerator":accelerator,
+        }
+    return {
+        "mode":"review_only", "available":False, "configured":False,
+        "missing":["training_worker"], "dataset_ready":dataset_ready,
+        "split_counts":split_counts, "accelerator":accelerator,
+    }
 
 def training_available():
-    return os.getenv("ENABLE_RETRAINING", "false").lower() == "true" and all(
-        os.path.isdir(os.path.join(DATA_DIR, split)) for split in ("train", "val", "test")
-    )
+    return training_configuration()["available"]
+
+def training_mode():
+    return training_configuration()["mode"]
+
+def _training_state() -> dict:
+    with _retrain_lock:
+        return dict(RETRAIN_STATE)
+
+def _update_training_state(**updates) -> None:
+    with _retrain_lock:
+        RETRAIN_STATE.update(updates)
+
+def _public_artifact_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed=urlsplit(value)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise HTTPException(422,"Candidate artifacts must use an HTTPS URL.")
+    # Signed artifact query strings are credentials; never retain or return them.
+    return urlunsplit((parsed.scheme,parsed.netloc,parsed.path,"",""))[:1000]
 
 def _run_training_job():
-    global RETRAIN_STATE
     import subprocess, sys
     try:
+        external_url=os.getenv("EXTERNAL_TRAINING_URL", "").strip()
+        if external_url:
+            callback_base=os.getenv("PUBLIC_API_URL", "").strip().rstrip("/")
+            request_id=str(RETRAIN_STATE.get("job_id") or uuid.uuid4().hex)
+            payload=json.dumps({
+                "project":"laundryai",
+                "request_id":request_id,
+                "requested_at":_utc_now(),
+                "dataset":firebase_store.training_export_reference(),
+                "callback_url":f"{callback_base}/api/training/callback",
+                "required_metrics":["test_accuracy","macro_f1","per_class_recall","confusion_matrix"],
+            }).encode("utf-8")
+            headers={"Content-Type":"application/json"}
+            token=os.getenv("EXTERNAL_TRAINING_TOKEN", "").strip()
+            if token: headers["Authorization"]=f"Bearer {token}"
+            _update_training_state(status="dispatching",message="Securely dispatching the external GPU job.")
+            with urlrequest.urlopen(urlrequest.Request(external_url,data=payload,headers=headers,method="POST"),timeout=30) as response:
+                response_body=response.read(65_537)
+            if len(response_body)>65_536:
+                raise ValueError("Training worker response is too large")
+            result=json.loads(response_body.decode("utf-8") or "{}")
+            if not isinstance(result,dict):
+                raise ValueError("Training worker returned a non-object response")
+            remote_status=result.get("status","running")
+            if remote_status not in {"queued","running"}:
+                remote_status="running"
+            remote_id=str(result.get("job_id") or request_id)[:160]
+            with _retrain_lock:
+                # A very fast worker may callback before this request returns.
+                # Never reopen a job that already reached a terminal state.
+                if RETRAIN_STATE.get("status") not in {"completed","failed"}:
+                    RETRAIN_STATE.update(
+                        status=remote_status,job_id=remote_id,
+                        message="External GPU worker accepted the training job.",
+                    )
+            return
         script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train.py")
         candidate_dir=os.path.join(os.path.dirname(MODEL_PATH),"candidates")
         os.makedirs(candidate_dir,exist_ok=True)
         candidate_path=os.path.join(candidate_dir,f"fabric_candidate_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.pt")
         cmd = [sys.executable, script_path, "--data", DATA_DIR, "--epochs", "5", "--batch-size", "16", "--output", candidate_path]
-        RETRAIN_STATE["status"] = "running"
-        RETRAIN_STATE["started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        RETRAIN_STATE["message"] = "Retraining MobileNetV2 on verified dataset..."
+        _update_training_state(status="running",message="Training MobileNetV2 on the reviewed dataset.")
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."))
         if proc.returncode == 0:
-            RETRAIN_STATE["status"] = "completed"
-            RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            RETRAIN_STATE["message"] = "Candidate model trained. Review its held-out metrics before promotion."
-            RETRAIN_STATE["candidate_path"] = os.path.basename(candidate_path)
+            _update_training_state(status="completed",completed_at=_utc_now(),message="Candidate model trained. Review held-out metrics before promotion.",candidate_path=os.path.basename(candidate_path))
         else:
-            RETRAIN_STATE["status"] = "failed"
-            RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            RETRAIN_STATE["message"] = f"Training failed: {proc.stderr[:200]}"
-    except Exception as e:
-        RETRAIN_STATE["status"] = "failed"
-        RETRAIN_STATE["completed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        RETRAIN_STATE["message"] = f"Error during training: {str(e)}"
+            _update_training_state(status="failed",completed_at=_utc_now(),message="Training process failed.",error_type="TrainingProcessError")
+    except Exception as exc:
+        # Exception messages from HTTP clients can contain URLs or credentials.
+        _update_training_state(status="failed",completed_at=_utc_now(),message="Training dispatch failed.",error_type=type(exc).__name__)
 
 @app.post("/api/retrain", summary="Trigger continuous active learning model retraining")
 def trigger_retrain(request: Request):
     require_admin(request)
-    import threading
-    if not training_available():
-        raise HTTPException(409, "Retraining is disabled or the train/val/test dataset is incomplete.")
-    if RETRAIN_STATE["status"] == "running":
-        raise HTTPException(409, "Model retraining is already running.")
+    config=training_configuration()
+    if not config["available"]:
+        raise HTTPException(409, "Training is not ready. Review the reported training configuration.")
+    with _retrain_lock:
+        if RETRAIN_STATE["status"] in {"queued","dispatching","running"}:
+            raise HTTPException(409, "Model training is already running.")
+        request_id=uuid.uuid4().hex
+        RETRAIN_STATE.update({
+            "status":"queued", "started_at":_utc_now(), "completed_at":None,
+            "message":"Training job queued.", "job_id":request_id,
+            "request_id":request_id, "mode":config["mode"], "metrics":None, "candidate_url":None,
+            "candidate_path":None, "error_type":None,
+        })
     worker = threading.Thread(target=_run_training_job, daemon=True)
     worker.start()
     return {
         "status": "started",
         "message": "Asynchronous retraining job dispatched across active learning dataset.",
-        "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        "job_id":request_id,
+        "started_at": RETRAIN_STATE["started_at"],
     }
 
 @app.get("/api/retrain/status", summary="Get model retraining job status")
 def retrain_status(request: Request):
     require_admin(request)
-    return RETRAIN_STATE
+    return {**_training_state(), "configuration":training_configuration()}
+
+@app.post("/api/training/callback", include_in_schema=False)
+def training_callback(update: TrainingCallback, request: Request):
+    expected=os.getenv("TRAINING_CALLBACK_TOKEN", "").strip()
+    supplied=request.headers.get("x-training-token", "")
+    if not expected or not supplied or not __import__("hmac").compare_digest(expected,supplied):
+        raise HTTPException(401,"Invalid training callback credentials.")
+    artifact_url=_public_artifact_url(update.candidate_url)
+    if update.status == "completed" and not update.metrics:
+        raise HTTPException(422,"Completed training callbacks require evaluation metrics.")
+    with _retrain_lock:
+        active_job=str(RETRAIN_STATE.get("job_id") or "")
+        request_id=str(RETRAIN_STATE.get("request_id") or active_job)
+        if not active_job or RETRAIN_STATE.get("mode") != "external_gpu":
+            raise HTTPException(409,"No external training job is awaiting updates.")
+        if update.job_id:
+            supplied_job=str(update.job_id)
+            if not (
+                __import__("hmac").compare_digest(active_job,supplied_job)
+                or __import__("hmac").compare_digest(request_id,supplied_job)
+            ):
+                raise HTTPException(409,"Training callback does not match the active job.")
+        if RETRAIN_STATE.get("status") in {"completed","failed"}:
+            raise HTTPException(409,"The training job is already in a terminal state.")
+        if RETRAIN_STATE.get("status") == "running" and update.status == "queued":
+            raise HTTPException(409,"Training status cannot move backwards.")
+        RETRAIN_STATE.update({
+            "status":update.status,
+            "message":f"External training job {update.status}.",
+            "candidate_url":artifact_url,
+            "metrics":update.metrics if update.status == "completed" else None,
+            "completed_at":_utc_now() if update.status in {"completed","failed"} else None,
+        })
+    return {"accepted":True,"status":update.status}
 
 # Production deployment: the React build and API share one origin, so `/api`
 # requests work without a separate Vite development server or proxy.

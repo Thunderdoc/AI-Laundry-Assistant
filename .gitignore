@@ -8,9 +8,9 @@ dist/
 *.log
 *.tsbuildinfo
 backend/models/*.pt
+backend/models/candidates/
 data/uploads/*
 !data/uploads/.gitkeep
 .env
 .DS_Store
 Thumbs.db
-

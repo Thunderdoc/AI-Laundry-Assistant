@@ -90,6 +90,8 @@ weights = [total_train / (len(ORDER) * max(1, count)) for count in class_counts]
 class_weights_tensor = torch.tensor(weights, dtype=torch.float32)
 
 device="cuda" if torch.cuda.is_available() else "cpu"
+amp_enabled=device == "cuda"
+scaler=torch.amp.GradScaler("cuda", enabled=amp_enabled)
 class_weights_tensor = class_weights_tensor.to(device)
 
 model=models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
@@ -118,10 +120,12 @@ for epoch in range(args.epochs):
     for x,y in train_loader:
         x=x.to(device, non_blocking=True); y=y.to(device, non_blocking=True)
         optimizer.zero_grad()
-        logits=model(x)
-        loss=criterion(logits,y)
-        loss.backward()
-        optimizer.step()
+        with torch.amp.autocast(device_type=device, enabled=amp_enabled):
+            logits=model(x)
+            loss=criterion(logits,y)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         train_loss+=loss.item()*len(y)
         train_good+=(logits.argmax(1)==y).sum().item()
         train_n+=len(y)
@@ -217,6 +221,8 @@ manifest={
     "artifact_status":"candidate",
     "trained_at":datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
     "architecture":"MobileNetV2 transfer learning",
+    "training_device":torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+    "mixed_precision":amp_enabled,
     "classes":train_ds.classes,
     "input_size":INPUT_SIZE,
     "normalization":{"mean":MEAN,"std":STD},
