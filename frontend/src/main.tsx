@@ -77,13 +77,11 @@ function AuthGate() {
           }
           const passwordAccount=firebaseUser.providerData.some((provider) => provider.providerId === "password");
           if (passwordAccount && !firebaseUser.emailVerified) {
-            localStorage.removeItem("laundryai_firebase_token");
             setVerificationPending(true);
-            setAuthNotice("Verify your email, then sign in again to continue.");
-            setUser(null);
-            return;
+            setAuthNotice("You can continue now. Verify your email when it arrives to secure account recovery and administrator access.");
+          } else {
+            setVerificationPending(false);
           }
-          setVerificationPending(false);
           try {
             const idToken = await firebaseUser.getIdToken();
             if (firebaseConfig.databaseURL) {
@@ -153,9 +151,13 @@ function AuthGate() {
       const auth = getAuth(app);
       if (isRegistering) {
         const credential=await createUserWithEmailAndPassword(auth, email.trim(), password);
-        await sendEmailVerification(credential.user);
         setVerificationPending(true);
-        setAuthNotice("Verification email sent. Open the link, then sign in again.");
+        try {
+          await sendEmailVerification(credential.user);
+          setAuthNotice("Account created. Verification email sent; you can continue using the app now.");
+        } catch {
+          setAuthNotice("Account created. Verification email is delayed, but you can continue using the app now.");
+        }
       }
       else await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (error) {
