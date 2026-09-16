@@ -123,7 +123,16 @@ def status(probe: bool = False) -> dict[str, Any]:
         "image_storage": "firebase-storage" if enabled() else "local-filesystem",
         "selection": _value("PERSISTENCE_BACKEND").lower() or "auto",
     }
-    if not enabled():
+    if enabled():
+        state["credential_source"] = (
+            "base64-json" if _value("FIREBASE_SERVICE_ACCOUNT_JSON_B64")
+            else "raw-json" if _value("FIREBASE_SERVICE_ACCOUNT_JSON")
+            else "file" if _value("FIREBASE_SERVICE_ACCOUNT_FILE")
+            else "none"
+        )
+    if enabled() and not state["configured"]:
+        state["firebase_missing"] = [name for name, present in requirements.items() if not present]
+    elif not enabled():
         state["firebase_missing"] = [name for name, present in requirements.items() if not present]
     if probe and enabled() and state["configured"]:
         try:
