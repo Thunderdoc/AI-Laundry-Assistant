@@ -45,6 +45,8 @@ function AuthGate() {
   const [isRegistering, setIsRegistering] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
   const [verificationPending, setVerificationPending] = useState(false);
+  const [showAdminRecovery, setShowAdminRecovery] = useState(false);
+  const [adminCode, setAdminCode] = useState("");
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -200,6 +202,23 @@ function AuthGate() {
     setUser(null);
   };
 
+  const handleAdminRecovery = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAuthError("");
+    setIsSigningIn(true);
+    try {
+      const response=await fetch(`${API}/auth/admin-recovery`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:email.trim(),access_code:adminCode})});
+      const data=await response.json();
+      if(!response.ok) throw new Error(data.detail || "Admin recovery failed.");
+      localStorage.setItem("laundryai_firebase_token",data.access_token);
+      setShowAdminRecovery(false);
+      setAdminCode("");
+      setUser(data.user);
+    } catch(error) {
+      setAuthError(error instanceof Error ? error.message : "Admin recovery failed.");
+    } finally { setIsSigningIn(false); }
+  };
+
   const continueAsGuest = () => {
     setUser({ uid: "local-guest", email: "", name: "Local preview", guest: true });
   };
@@ -227,6 +246,7 @@ function AuthGate() {
               <button className="google-login" onClick={handleGoogleLogin} disabled={isSigningIn}>
                 <span className="google-g">G</span>Continue with Google
               </button>
+              <button className="admin-recovery-link" type="button" onClick={() => setShowAdminRecovery(true)}>Administrator recovery</button>
             </> : <>
               <div className="auth-setup"><strong>Firebase setup pending</strong><br />Email, password and Google sign-in will activate after deployment.</div>
               <button className="email-login-submit guest-entry" type="button" onClick={continueAsGuest}>CONTINUE AS GUEST <span>→</span></button>
@@ -237,6 +257,19 @@ function AuthGate() {
         {authError && <p className="login-error" role="alert">{authError}</p>}
         <small>Care labels always remain the final authority.</small>
       </section>
+      {showAdminRecovery && <div className="auth-modal-backdrop" role="presentation" onMouseDown={() => setShowAdminRecovery(false)}>
+        <section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="admin-recovery-title" onMouseDown={(event) => event.stopPropagation()}>
+          <button className="auth-modal-close" type="button" aria-label="Close" onClick={() => setShowAdminRecovery(false)}>×</button>
+          <span className="eyebrow">SECURE FALLBACK</span>
+          <h2 id="admin-recovery-title">Administrator recovery</h2>
+          <p>Use the administrator email and the private recovery code stored only in Render.</p>
+          <form onSubmit={handleAdminRecovery}>
+            <label>Email<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+            <label>Recovery code<input type="password" required minLength={24} value={adminCode} onChange={(event) => setAdminCode(event.target.value)} /></label>
+            <button className="email-login-submit" disabled={isSigningIn}>{isSigningIn ? "VERIFYING…" : "OPEN ADMIN CONSOLE"}</button>
+          </form>
+        </section>
+      </div>}
       <aside className="login-aside">
         <div className="login-aside-orb orb-one" /><div className="login-aside-orb orb-two" /><div className="login-aside-orb orb-three" />
         <div className="login-aside-content"><span>SMARTER LAUNDRY</span><h2>Understand the fabric.<br /><i>Care for what matters.</i></h2><p>AI-assisted fabric recognition and clear laundry care advice, all in one place.</p>

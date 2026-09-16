@@ -121,6 +121,15 @@ body {
 .login-flow b { color: #b9dfcd; font-size: 10px; letter-spacing: 1px; }
 .login-flow span { color: #f6fbf8; font-size: 10px; line-height: 1.4; font-weight: 650; }
 .login-aside-footer { z-index: 1; display: flex; align-items: center; gap: 7px; color: #d9eee4; font-size: 10px; font-weight: 650; letter-spacing: .35px; }
+.admin-recovery-link { margin-top: 12px; border: 0; background: transparent; color: var(--primary); font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.auth-modal-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(2,35,27,.62); backdrop-filter: blur(5px); }
+.auth-modal { position: relative; width: min(440px,100%); padding: 30px; border-radius: 22px; background: var(--surface); box-shadow: 0 24px 70px rgba(0,0,0,.3); }
+.auth-modal h2 { margin: 8px 0; color: var(--primary-dark); }
+.auth-modal p { margin-bottom: 18px; color: var(--text-muted); line-height: 1.5; }
+.auth-modal form { display: grid; gap: 14px; }
+.auth-modal label { display: grid; gap: 7px; color: var(--primary-dark); font-weight: 700; }
+.auth-modal input { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.auth-modal-close { position: absolute; top: 12px; right: 14px; border: 0; background: transparent; font-size: 27px; cursor: pointer; color: var(--text-muted); }
 .live-dot { width: 7px; height: 7px; display: inline-block; border-radius: 50%; background: #b3e2cd; box-shadow: 0 0 0 4px rgba(179,226,205,.14); }
 .admin-page { max-width: 1180px; }
 .admin-hero { display: flex; justify-content: space-between; gap: 24px; align-items: flex-end; padding: 34px; border-radius: 24px; background: linear-gradient(125deg, #063f31, #087056); color: #f8fcf9; overflow: hidden; position: relative; }
