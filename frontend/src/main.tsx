@@ -736,7 +736,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         apiFetch(`${API}/admin/users`),
       ]);
       if (!overviewResponse.ok) throw new Error("Admin service is unavailable.");
-      setAdminOverview(await overviewResponse.json());
+      const overview=await overviewResponse.json();
+      setAdminOverview(overview);
+      setAdminMessage((overview.warnings || []).join(" "));
       if (feedbackResponse.ok) setAdminFeedback((await feedbackResponse.json()).items || []);
       if (usersResponse.ok) setAdminUsers((await usersResponse.json()).users || []);
     };
@@ -2720,11 +2722,11 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
         <main className="page-container admin-page">
           <section className="admin-hero">
             <div>
-              <span className="eyebrow">ADMIN CONSOLE</span>
-              <h1>Model operations, in one place.</h1>
-              <p>Review live model readiness, scan activity, dataset growth, and retraining status. Retraining should follow reviewed user feedback.</p>
+              <span className="eyebrow">LAUNDRYAI CONTROL CENTER</span>
+              <h1>Operate the product with evidence.</h1>
+              <p>Monitor infrastructure, review training evidence, manage access, and prepare safer model releases without pretending a web server is a GPU training platform.</p>
             </div>
-            <div className="admin-identity"><span>ADMIN</span><strong>{user.email}</strong></div>
+            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>Backend-authorized session</small></div>
           </section>
 
           {adminMessage && <div className="admin-alert">{adminMessage}</div>}
@@ -2736,12 +2738,47 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
             <div><span>Model status</span><b>{adminOverview?.model_ready ? "Ready" : "Checking"}</b><small>Live inference availability</small></div>
           </section>
 
+          <section className="admin-health-panel">
+            <div className="admin-section-heading">
+              <div><span className="eyebrow">SYSTEM READINESS</span><h2>Production health</h2></div>
+              <strong className="readiness-score">{[
+                adminOverview?.model_ready,
+                adminOverview?.auth?.firebase_project,
+                adminOverview?.auth?.admin_allowlist,
+                adminOverview?.persistence?.backend === "firebase",
+                adminOverview?.persistence?.reachable === true,
+              ].filter(Boolean).length * 20}%</strong>
+            </div>
+            <div className="admin-service-grid">
+              {[
+                ["AI inference", adminOverview?.model_ready, adminOverview?.model_ready ? "TorchScript model loaded" : "Model unavailable"],
+                ["Authentication", adminOverview?.auth?.firebase_project, "Google-signed Firebase tokens"],
+                ["Admin policy", adminOverview?.auth?.admin_allowlist, "Verified email allowlist"],
+                ["Database mode", adminOverview?.persistence?.backend === "firebase", adminOverview?.persistence?.database || "Checking"],
+                ["Cloud connection", adminOverview?.persistence?.reachable === true, adminOverview?.persistence?.reachable === false ? `Blocked: ${adminOverview?.persistence?.error || "configuration"}` : "Database and Storage reachable"],
+              ].map(([label,ok,detail]) => <div className={`admin-service ${ok ? "healthy" : "blocked"}`} key={String(label)}><span>{ok ? "✓" : "!"}</span><div><b>{String(label)}</b><small>{String(detail)}</small></div></div>)}
+            </div>
+          </section>
+
+          <section className="admin-review-queue">
+            <div className="admin-section-heading">
+              <div><span className="eyebrow">DATASET OBSERVABILITY</span><h2>Class balance</h2></div>
+              <span className="admin-count">{adminOverview?.dataset?.total_samples ?? 0} samples</span>
+            </div>
+            <div className="admin-dataset-grid">
+              {Object.entries(adminOverview?.dataset?.classes || {}).map(([label,value]: [string, any]) => {
+                const maximum=Math.max(1,...Object.values(adminOverview?.dataset?.classes || {}).map((item:any) => Number(item.total)||0));
+                return <div className="admin-dataset-row" key={label}><span>{label.replace("_"," ")}</span><div><i style={{width:`${Math.max(3,(Number(value.total)||0)/maximum*100)}%`}} /></div><b>{value.total}</b><small>{value.user_verified} reviewed</small></div>;
+              })}
+            </div>
+          </section>
+
           <section className="admin-workspace">
             <div>
               <span className="eyebrow">ACTIVE LEARNING</span>
-              <h2>Retraining control</h2>
-              <p>Only retrain after checking corrected labels. The system keeps the existing model until a replacement has been trained and evaluated.</p>
-              <button className="btn btn-primary" type="button" onClick={async () => {
+              <h2>Candidate training pipeline</h2>
+              <p>Review labels here, export approved images, train on a GPU workstation, and deploy only a candidate that passes held-out accuracy, macro-F1, recall, latency, and regression gates.</p>
+              {adminOverview?.training_available ? <button className="btn btn-primary" type="button" onClick={async () => {
                 if (!window.confirm("Start model retraining from reviewed feedback?")) return;
                 setAdminMessage("Starting retraining…");
                 try {
@@ -2753,15 +2790,17 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
                 } catch (error) {
                   setAdminMessage(error instanceof Error ? error.message : "Could not start retraining.");
                 }
-              }}>Start reviewed retraining</button>
+              }}>Start reviewed retraining</button> : <div className="training-disabled"><b>Web retraining intentionally off</b><span>Render serves predictions. It should not train a MobileNet model inside a 512 MB web process.</span><code>python backend/scripts/export_approved_feedback.py --output data/train</code><code>python backend/scripts/train.py --data data --epochs 20</code></div>}
               {adminOverview?.retraining?.status === "running" && <p className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</p>}
             </div>
             <div className="admin-checklist">
               <h3>Before deployment</h3>
-              <p>✓ Check corrected fabric labels</p>
-              <p>✓ Compare accuracy, precision, recall, and F1</p>
-              <p>✓ Keep the current model if validation does not improve</p>
-              <p>✓ Document the new model version</p>
+              <p>1. Approve corrected labels</p>
+              <p>2. Export the reviewed dataset</p>
+              <p>3. Train a versioned candidate offline</p>
+              <p>4. Compare held-out metrics and regressions</p>
+              <p>5. Promote through a reviewed deployment</p>
+              <div className="model-metric-mini"><span>Current accuracy <b>{adminOverview?.model_metrics?.test_accuracy != null ? `${(adminOverview.model_metrics.test_accuracy*100).toFixed(1)}%` : "Not recorded"}</b></span><span>Macro F1 <b>{adminOverview?.model_metrics?.macro_f1 != null ? `${(adminOverview.model_metrics.macro_f1*100).toFixed(1)}%` : "Not recorded"}</b></span></div>
             </div>
           </section>
 

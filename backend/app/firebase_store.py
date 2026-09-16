@@ -90,7 +90,7 @@ def status(probe: bool = False) -> dict[str, Any]:
             state["reachable"] = True
         except Exception as exc:
             state["reachable"] = False
-            state["error"] = str(exc)
+            state["error"] = type(exc).__name__
     return state
 
 

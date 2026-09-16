@@ -1,4 +1,5 @@
-import csv, io, json, os, shutil, sqlite3, uuid
+import csv, io, json, os, shutil, sqlite3, threading, time, uuid, warnings
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,6 +23,39 @@ known_origins={
     "https://ai-laundry-assistant-psi.vercel.app",
 }
 app.add_middleware(CORSMiddleware, allow_origins=sorted(configured_origins | known_origins), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+Image.MAX_IMAGE_PIXELS=20_000_000
+
+_rate_events: dict[str, deque[float]] = defaultdict(deque)
+_rate_lock=threading.Lock()
+
+def _rate_rule(request: Request):
+    path=request.url.path
+    if request.method=="POST" and path.startswith("/api/auth/"): return 20,60
+    if request.method=="POST" and path in {"/api/predict","/api/feedback"}: return 30,60
+    if request.method in {"POST","PATCH","DELETE"} and path.startswith("/api/admin/"): return 60,60
+    return None
+
+@app.middleware("http")
+async def security_controls(request: Request, call_next):
+    rule=_rate_rule(request)
+    if rule:
+        limit,window=rule
+        address=(request.headers.get("x-forwarded-for","").split(",")[-1].strip() or (request.client.host if request.client else "unknown"))
+        key=f"{address}:{request.method}:{request.url.path}"
+        now=time.monotonic()
+        with _rate_lock:
+            events=_rate_events[key]
+            while events and events[0] <= now-window: events.popleft()
+            if len(events)>=limit:
+                return Response(status_code=429,content='{"detail":"Too many requests. Try again shortly."}',media_type="application/json",headers={"Retry-After":str(window)})
+            events.append(now)
+    response=await call_next(request)
+    response.headers["X-Content-Type-Options"]="nosniff"
+    response.headers["X-Frame-Options"]="DENY"
+    response.headers["Referrer-Policy"]="strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"]="camera=(self), microphone=(), geolocation=()"
+    response.headers["Cache-Control"]="no-store" if request.url.path.startswith("/api/") else response.headers.get("Cache-Control","no-cache")
+    return response
 
 FIREBASE_CONFIG = {
     "apiKey": os.getenv("FIREBASE_API_KEY", "").strip(),
@@ -143,7 +177,7 @@ def saved_history(owner_uid: str | None = None):
         try:
             return firebase_store.list_predictions(owner_uid)
         except Exception as exc:
-            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+            raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     with connection() as db:
         if owner_uid is None:
             rows=db.execute("SELECT payload FROM predictions ORDER BY id DESC")
@@ -289,10 +323,23 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
             note=None
     kind=(image.content_type or "").split(";")[0].strip().lower()
     if kind not in {"image/jpeg","image/png","image/webp","application/octet-stream",""}: raise HTTPException(415,"Upload JPG, PNG, or WEBP.")
-    data=await image.read()
-    if not data or len(data)>10*1024*1024: raise HTTPException(413,"Image must be between 1 byte and 10 MB.")
+    chunks=[]; total=0
+    while chunk:=await image.read(1024*1024):
+        total+=len(chunk)
+        if total>10*1024*1024: raise HTTPException(413,"Image must be between 1 byte and 10 MB.")
+        chunks.append(chunk)
+    data=b"".join(chunks)
+    if not data: raise HTTPException(413,"Image must be between 1 byte and 10 MB.")
     try:
-        im=Image.open(io.BytesIO(data)).convert("RGB")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error",Image.DecompressionBombWarning)
+            source=Image.open(io.BytesIO(data))
+            source.verify()
+            source=Image.open(io.BytesIO(data))
+            source.load()
+            if source.width>6000 or source.height>6000: raise ValueError("Image dimensions are too large")
+            im=source.convert("RGB")
+    except (Image.DecompressionBombError,Image.DecompressionBombWarning): raise HTTPException(413,"Image dimensions are too large.")
     except Exception: raise HTTPException(422,"Invalid image.")
     
     # Prepare a normalized JPEG for private feedback storage. In production it
@@ -326,7 +373,7 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(500, f"Model inference failed: {str(exc)}")
+        raise HTTPException(500, "Model inference failed.") from exc
     ranked=sorted(zip(names,probabilities), key=lambda x:x[1], reverse=True)
     fabric, confidence=ranked[0]
     second=ranked[1][1] if len(ranked)>1 else 0.0
@@ -370,7 +417,7 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
         try:
             record=firebase_store.create_prediction(owner_uid, record, normalized_bytes)
         except Exception as exc:
-            raise HTTPException(503, f"Could not save the prediction to Firebase: {exc}") from exc
+            raise HTTPException(503, "Could not save the prediction securely.") from exc
     else:
         with connection() as db:
             cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(owner_uid,record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
@@ -395,7 +442,7 @@ def feedback(request: Request, payload: dict = Body(...)):
         try:
             rec=firebase_store.get_prediction(str(pred_id), owner_uid)
         except Exception as exc:
-            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+            raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     else:
         with connection() as db:
             row = db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?", (pred_id, owner_uid)).fetchone()
@@ -408,7 +455,7 @@ def feedback(request: Request, payload: dict = Body(...)):
         try:
             item=firebase_store.submit_feedback(rec, confirmed_fabric, was_correct)
         except Exception as exc:
-            raise HTTPException(503, f"Could not store feedback in Firebase: {exc}") from exc
+            raise HTTPException(503, "Could not store feedback securely.") from exc
         return {
             "status":"success", "confirmed_fabric":confirmed_fabric,
             "was_correct":was_correct, "saved_to_dataset":False,
@@ -447,8 +494,7 @@ def feedback(request: Request, payload: dict = Body(...)):
         "message": f"Correction submitted as {confirmed_fabric.capitalize()} for administrator review."
     }
 
-@app.get("/api/dataset/stats", summary="Get training dataset sample counts")
-def dataset_stats():
+def local_dataset_stats():
     train_dir = os.path.join(DATA_DIR, "train")
     stats = {}
     total = 0
@@ -461,21 +507,23 @@ def dataset_stats():
         stats[item] = {"total": count, "user_verified": user_count}
         total += count
         user_contributed += user_count
+    return {"total_samples":total,"user_contributed":user_contributed,"classes":stats}
+
+@app.get("/api/dataset/stats", summary="Get training dataset sample counts")
+def dataset_stats():
+    result=local_dataset_stats()
+    stats=result["classes"]
     if firebase_store.enabled() and firebase_store.configured():
         try:
             for item, count in firebase_store.approved_counts().items():
                 if item in stats:
                     stats[item]["total"] += count
                     stats[item]["user_verified"] += count
-                    total += count
-                    user_contributed += count
+                    result["total_samples"] += count
+                    result["user_contributed"] += count
         except Exception as exc:
-            raise HTTPException(503, f"Could not load cloud dataset statistics: {exc}") from exc
-    return {
-        "total_samples": total,
-        "user_contributed": user_contributed,
-        "classes": stats
-    }
+            raise HTTPException(503, "Could not load cloud dataset statistics.") from exc
+    return result
 
 @app.get("/api/history")
 def get_history(request: Request): return saved_history(request_uid(request))
@@ -498,7 +546,7 @@ def update_history_note(record_id:str, request: Request, payload:dict=Body(...))
         try:
             data=firebase_store.update_prediction(record_id,owner_uid,{"note":new_note})
         except Exception as exc:
-            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+            raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
         if not data: raise HTTPException(404,"Analysis not found")
         return data
     with connection() as db:
@@ -515,7 +563,7 @@ def delete_history(record_id:str, request: Request):
         try:
             deleted=firebase_store.delete_prediction(record_id,request_uid(request))
         except Exception as exc:
-            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+            raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
         if not deleted: raise HTTPException(404,"Analysis not found")
         return {"deleted":True}
     with connection() as db:
@@ -528,11 +576,14 @@ def export_history_csv(request: Request):
     output=io.StringIO()
     writer=csv.writer(output)
     writer.writerow(["ID","Date","Fabric","Confidence (%)","Care Note","Wash Temp","Wash Cycle","Dry","Iron","Bleach","Eco Advice"])
+    def safe_csv(value):
+        if isinstance(value,str) and value.lstrip().startswith(("=","+","-","@")): return "'"+value
+        return value
     for item in history:
         rec=item.get("recommendation") or {}
         wash=rec.get("wash",{}) if isinstance(rec.get("wash"),dict) else {}
         eco="; ".join(rec.get("eco",[])) if isinstance(rec.get("eco"),list) else ""
-        writer.writerow([
+        writer.writerow([safe_csv(value) for value in [
             item.get("id",""),
             item.get("created_at",""),
             item.get("fabric",""),
@@ -544,7 +595,7 @@ def export_history_csv(request: Request):
             rec.get("iron",""),
             rec.get("bleach",""),
             eco
-        ])
+        ]])
     return Response(
         content=output.getvalue(),
         media_type="text/csv",
@@ -557,7 +608,7 @@ def clear_history(request: Request):
         try:
             return {"deleted":True,"count":firebase_store.clear_predictions(request_uid(request))}
         except Exception as exc:
-            raise HTTPException(503, f"Cloud database is unavailable: {exc}") from exc
+            raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     with connection() as db: db.execute("DELETE FROM predictions WHERE owner_uid=?",(request_uid(request),))
     return {"deleted":True}
 
@@ -571,19 +622,42 @@ def analytics(request: Request):
 @app.get("/api/admin/overview")
 def admin_overview(request: Request):
     admin = require_admin(request)
-    history = saved_history()
-    feedback_count = sum(1 for item in history if item.get("user_feedback"))
     state=model_status()
+    persistence=firebase_store.status(probe=True)
+    warnings_list=[]
+    try:
+        history=saved_history()
+    except HTTPException:
+        history=[]
+        warnings_list.append("Firebase data is unavailable. Replace the malformed service-account JSON in Render.")
+    try:
+        dataset=dataset_stats()
+    except HTTPException:
+        dataset=local_dataset_stats()
+        warnings_list.append("Cloud-approved training samples could not be counted.")
+    if persistence.get("reachable") is False:
+        warnings_list.append(f"Persistence health check failed ({persistence.get('error','configuration error')}).")
+    feedback_count=sum(1 for item in history if item.get("user_feedback"))
+    manifest=load_manifest()
     return {
         "admin_email": admin.get("email"),
         "total_scans": len(history),
         "feedback_records": feedback_count,
         "model_ready": state["ready"],
         "model_error": state["error"],
-        "persistence": firebase_store.status(),
-        "dataset": dataset_stats(),
+        "persistence": persistence,
+        "auth":{"firebase_project":firebase_auth_enabled(),"admin_allowlist":bool(ADMIN_EMAILS)},
+        "dataset": dataset,
+        "model_metrics":{
+            "test_accuracy":manifest.get("test_accuracy"),
+            "macro_f1":manifest.get("macro_f1"),
+            "test_images":manifest.get("test_images"),
+            "version":manifest.get("model_version") or manifest.get("version") or "deployed",
+        },
         "retraining": RETRAIN_STATE,
         "training_available": training_available(),
+        "training_mode":"offline_gpu_recommended",
+        "warnings":warnings_list,
     }
 
 @app.get("/api/admin/users")
@@ -650,7 +724,7 @@ def admin_feedback(request: Request):
         try:
             items=firebase_store.list_feedback("pending")
         except Exception as exc:
-            raise HTTPException(503, f"Cloud feedback queue is unavailable: {exc}") from exc
+            raise HTTPException(503, "Cloud feedback queue is temporarily unavailable.") from exc
         return {"count":len(items),"items":[{
             "id":item["id"], "fabric":item["confirmed_fabric"],
             "file":item["id"], "filename":item.get("filename"),
@@ -674,7 +748,7 @@ def admin_feedback_image(fabric_name: str, filename: str, request: Request):
         try:
             content=firebase_store.feedback_image(os.path.basename(filename))
         except Exception as exc:
-            raise HTTPException(503, f"Could not load feedback image: {exc}") from exc
+            raise HTTPException(503, "Could not load the protected feedback image.") from exc
         if content is None: raise HTTPException(404,"Pending feedback image not found.")
         return Response(content=content,media_type="image/jpeg",headers={"Cache-Control":"private, no-store"})
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))
@@ -690,7 +764,7 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
         try:
             item=firebase_store.review_feedback(safe_name,str(admin.get("uid")),True)
         except Exception as exc:
-            raise HTTPException(503, f"Could not approve feedback: {exc}") from exc
+            raise HTTPException(503, "Could not approve this feedback item.") from exc
         if not item: raise HTTPException(404,"Pending feedback image not found.")
         return {"approved":True,"fabric":item["confirmed_fabric"],"file":item["filename"]}
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,safe_name)
@@ -709,7 +783,7 @@ def reject_feedback(fabric_name: str, filename: str, request: Request):
         try:
             item=firebase_store.review_feedback(os.path.basename(filename),str(admin.get("uid")),False)
         except Exception as exc:
-            raise HTTPException(503, f"Could not reject feedback: {exc}") from exc
+            raise HTTPException(503, "Could not reject this feedback item.") from exc
         if not item: raise HTTPException(404,"Pending feedback image not found.")
         return {"rejected":True}
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))

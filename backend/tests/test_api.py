@@ -32,6 +32,9 @@ class TestLaundryAIAPI(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["status"], "ok")
         self.assertTrue(data["model_ready"], data.get("model_error"))
+        self.assertEqual(response.headers.get("x-content-type-options"), "nosniff")
+        self.assertEqual(response.headers.get("x-frame-options"), "DENY")
+        self.assertEqual(response.headers.get("cache-control"), "no-store")
 
         root = self.client.get("/")
         self.assertEqual(root.status_code, 200)
@@ -72,6 +75,11 @@ class TestLaundryAIAPI(unittest.TestCase):
         # 2. Corrupted image with valid content type
         res = self.client.post("/api/predict", files={"image": ("bad.jpg", b"not an image", "image/jpeg")})
         self.assertEqual(res.status_code, 422)
+
+        # Oversized uploads are rejected while streaming instead of being read
+        # into unbounded server memory.
+        res = self.client.post("/api/predict", files={"image": ("huge.jpg", b"x" * (10 * 1024 * 1024 + 1), "image/jpeg")})
+        self.assertEqual(res.status_code, 413)
 
         # 3. Valid image should return either accepted fabric or explicit unknown rejection
         img = Image.new("RGB", (100, 100), color=(128, 128, 128))
@@ -181,6 +189,14 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertEqual(res_csv.status_code, 200)
         self.assertIn("text/csv", res_csv.headers.get("content-type", ""))
         self.assertIn("ID,Date,Fabric", res_csv.text)
+
+        # Spreadsheet formula prefixes from user-controlled notes are escaped.
+        from app import main
+        with connection() as db:
+            payload={"id":999,"created_at":"2026-01-01T00:00:00Z","fabric":"cotton","confidence":90,"note":"=HYPERLINK(\"https://example.invalid\")","recommendation":None}
+            db.execute("INSERT INTO predictions (id,owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?,?)",(999,"local-preview",payload["created_at"],"cotton",90,__import__("json").dumps(payload)))
+        escaped=self.client.get("/api/history/export/csv")
+        self.assertIn("'=HYPERLINK",escaped.text)
 
         # Test clear all history
         res_clear = self.client.delete("/api/history")
