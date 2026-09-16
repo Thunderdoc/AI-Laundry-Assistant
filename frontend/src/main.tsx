@@ -678,6 +678,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [adminFeedback, setAdminFeedback] = useState<AdminFeedbackItem[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminMessage, setAdminMessage] = useState("");
+  const [adminTab, setAdminTab] = useState<"overview" | "feedback" | "users" | "model">("overview");
+  const [adminRefreshKey, setAdminRefreshKey] = useState(0);
+  const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
   const [compareActive, setCompareActive] = useState(false);
   const [researchTab, setResearchTab] = useState<string>("problem");
@@ -741,6 +744,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       setAdminMessage((overview.warnings || []).join(" "));
       if (feedbackResponse.ok) setAdminFeedback((await feedbackResponse.json()).items || []);
       if (usersResponse.ok) setAdminUsers((await usersResponse.json()).users || []);
+      setAdminLastUpdated(new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}));
     };
     void refreshAdminOverview().catch(() => setAdminMessage("Connect the secure backend to load live admin statistics."));
     // Conditional loop: it polls only while the model-training job is active.
@@ -748,7 +752,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       timer = window.setInterval(() => void refreshAdminOverview().catch(() => undefined), 5000);
     }
     return () => { if (timer) window.clearInterval(timer); };
-  }, [user.is_admin, adminOverview?.retraining?.status]);
+  }, [user.is_admin, adminOverview?.retraining?.status, adminRefreshKey]);
 
   useEffect(() => {
     if (stream && video.current) {
@@ -2726,11 +2730,16 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
               <h1>Operate the product with evidence.</h1>
               <p>Monitor infrastructure, review training evidence, manage access, and prepare safer model releases without pretending a web server is a GPU training platform.</p>
             </div>
-            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>Backend-authorized session</small></div>
+            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>{adminLastUpdated ? `Updated ${adminLastUpdated}` : "Loading live data"}</small><button type="button" onClick={() => setAdminRefreshKey((value) => value+1)}>↻ Refresh data</button></div>
           </section>
 
           {adminMessage && <div className="admin-alert">{adminMessage}</div>}
 
+          <nav className="admin-tabs" aria-label="Admin operations">
+            {([['overview','Operations'],['feedback',`Review queue (${adminFeedback.length})`],['users',`Users (${adminUsers.length})`],['model','Model release']] as const).map(([key,label]) => <button type="button" key={key} className={adminTab===key ? "active" : ""} onClick={() => setAdminTab(key)}>{label}</button>)}
+          </nav>
+
+          {adminTab === "overview" && <>
           <section className="admin-stats-grid">
             <div><span>Total scans</span><b>{adminOverview?.total_scans ?? history.length}</b><small>Recorded analyses</small></div>
             <div><span>Feedback records</span><b>{adminOverview?.feedback_records ?? 0}</b><small>Awaiting review or included data</small></div>
@@ -2772,7 +2781,9 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
               })}
             </div>
           </section>
+          </>}
 
+          {adminTab === "model" &&
           <section className="admin-workspace">
             <div>
               <span className="eyebrow">ACTIVE LEARNING</span>
@@ -2802,8 +2813,9 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
               <p>5. Promote through a reviewed deployment</p>
               <div className="model-metric-mini"><span>Current accuracy <b>{adminOverview?.model_metrics?.test_accuracy != null ? `${(adminOverview.model_metrics.test_accuracy*100).toFixed(1)}%` : "Not recorded"}</b></span><span>Macro F1 <b>{adminOverview?.model_metrics?.macro_f1 != null ? `${(adminOverview.model_metrics.macro_f1*100).toFixed(1)}%` : "Not recorded"}</b></span></div>
             </div>
-          </section>
+          </section>}
 
+          {adminTab === "feedback" &&
           <section className="admin-review-queue">
             <div className="admin-section-heading">
               <div><span className="eyebrow">HUMAN REVIEW</span><h2>Pending training feedback</h2></div>
@@ -2832,8 +2844,9 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
                 </div>
               </article>
             )) : <p className="admin-empty">No feedback is waiting for review.</p>}
-          </section>
+          </section>}
 
+          {adminTab === "users" &&
           <section className="admin-review-queue admin-users">
             <div className="admin-section-heading">
               <div><span className="eyebrow">ACCESS CONTROL</span><h2>Users and administrator roles</h2></div>
@@ -2869,7 +2882,7 @@ Output: Fabric Class F, Confidence C, Care Recommendation R
                 </div>
               </article>
             )) : <p className="admin-empty">No Firebase users could be loaded.</p>}
-          </section>
+          </section>}
         </main>
       )}
 
