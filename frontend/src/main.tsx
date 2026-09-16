@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
+import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
 import { MotionButton, MotionDiv, MotionPanel, Reveal, TextEffect } from "./motion-primitives";
 import "./style.css";
@@ -14,6 +14,7 @@ const API = configuredApi || (window.location.hostname.endsWith("vercel.app")
   ? "https://ai-laundry-assistant.onrender.com/api"
   : "/api");
 const NOTE_MAX_LENGTH = 240;
+const AUTH_SESSION_KEY = "laundryai_explicit_auth_session";
 
 type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean; is_admin?: boolean };
 type FirebaseSettings = { enabled: boolean; firebase_config: Record<string, string> | null };
@@ -68,10 +69,18 @@ function AuthGate() {
         const firebaseConfig = config.firebase_config;
         const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
         const auth = getAuth(app);
+        await setPersistence(auth, browserSessionPersistence);
+        let rejectRestoredAccount = sessionStorage.getItem(AUTH_SESSION_KEY) !== "1";
         unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
           if (!firebaseUser) {
             localStorage.removeItem("laundryai_firebase_token");
             setUser(null);
+            return;
+          }
+          if (rejectRestoredAccount && sessionStorage.getItem(AUTH_SESSION_KEY) !== "1") {
+            rejectRestoredAccount = false;
+            await signOut(auth);
+            setAuthNotice("Choose the Google or email account you want to use for this session.");
             return;
           }
           const passwordAccount=firebaseUser.providerData.some((provider) => provider.providerId === "password");
@@ -132,7 +141,12 @@ function AuthGate() {
     setIsSigningIn(true);
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
-      await signInWithPopup(getAuth(app), new GoogleAuthProvider());
+      const auth=getAuth(app);
+      await setPersistence(auth,browserSessionPersistence);
+      const provider=new GoogleAuthProvider();
+      provider.setCustomParameters({prompt:"select_account"});
+      sessionStorage.setItem(AUTH_SESSION_KEY,"1");
+      await signInWithPopup(auth, provider);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Google sign-in was cancelled or failed.");
     } finally {
@@ -148,6 +162,8 @@ function AuthGate() {
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
       const auth = getAuth(app);
+      await setPersistence(auth,browserSessionPersistence);
+      sessionStorage.setItem(AUTH_SESSION_KEY,"1");
       if (isRegistering) {
         const credential=await createUserWithEmailAndPassword(auth, email.trim(), password);
         setVerificationPending(true);
@@ -200,6 +216,7 @@ function AuthGate() {
   const handleSignOut = async () => {
     if (getApps().length) await signOut(getAuth(getApp()));
     localStorage.removeItem("laundryai_firebase_token");
+    sessionStorage.removeItem(AUTH_SESSION_KEY);
     setUser(null);
   };
 
@@ -657,6 +674,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [adminFeedback, setAdminFeedback] = useState<AdminFeedbackItem[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminMessage, setAdminMessage] = useState("");
+  const [adminLoading, setAdminLoading] = useState(false);
   const [adminTab, setAdminTab] = useState<"overview" | "feedback" | "users" | "model">("overview");
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
   const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
@@ -711,20 +729,34 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     if (!user.is_admin) return;
     let timer: number | undefined;
     const refreshAdminOverview = async () => {
+      setAdminLoading(true);
+      setAdminMessage("");
+      await fetch(`${API}/health`, { cache: "no-store" }).catch(() => undefined);
       const [overviewResponse, feedbackResponse, usersResponse] = await Promise.all([
         apiFetch(`${API}/admin/overview`),
         apiFetch(`${API}/admin/feedback`),
         apiFetch(`${API}/admin/users`),
       ]);
-      if (!overviewResponse.ok) throw new Error("Admin service is unavailable.");
+      if (!overviewResponse.ok) {
+        const failure=await overviewResponse.json().catch(() => ({}));
+        throw new Error(failure.detail || `Admin API returned ${overviewResponse.status}.`);
+      }
       const overview=await overviewResponse.json();
       setAdminOverview(overview);
       setAdminMessage((overview.warnings || []).join(" "));
       if (feedbackResponse.ok) setAdminFeedback((await feedbackResponse.json()).items || []);
       if (usersResponse.ok) setAdminUsers((await usersResponse.json()).users || []);
       setAdminLastUpdated(new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}));
+      setAdminLoading(false);
     };
-    void refreshAdminOverview().catch(() => setAdminMessage("Connect the secure backend to load live admin statistics."));
+    void refreshAdminOverview().catch(async (firstError) => {
+      await new Promise((resolve) => window.setTimeout(resolve,1500));
+      try { await refreshAdminOverview(); }
+      catch (error) {
+        setAdminLoading(false);
+        setAdminMessage(error instanceof Error ? error.message : firstError instanceof Error ? firstError.message : "Admin API unavailable.");
+      }
+    });
     // Conditional loop: it polls only while the model-training job is active.
     if (adminOverview?.retraining?.status === "running") {
       timer = window.setInterval(() => void refreshAdminOverview().catch(() => undefined), 5000);
@@ -2233,7 +2265,13 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             <MotionPanel panelKey={adminTab} className="admin-command-main">
               {adminMessage && <div className="admin-alert">{adminMessage}</div>}
 
-          {adminTab === "overview" && <>
+          {!adminOverview && <section className="admin-connect-state">
+            <span className="admin-connection-orb" />
+            <div><span className="eyebrow">SECURE API CONNECTION</span><h2>{adminLoading ? "Connecting to operations data…" : "Admin backend is unavailable"}</h2><p>{adminLoading ? "Render may need a short cold start. LaundryAI is authenticating your Firebase token and loading protected operational data." : "Deploy the latest backend commit on Render, then retry. No placeholder statistics are shown."}</p></div>
+            <button className="btn btn-primary" type="button" disabled={adminLoading} onClick={() => setAdminRefreshKey((value) => value+1)}>{adminLoading ? "Connecting…" : "Retry connection"}</button>
+          </section>}
+
+          {adminOverview && adminTab === "overview" && <>
           <section className="admin-stats-grid">
             <div><span>Total scans</span><b>{adminOverview?.total_scans ?? history.length}</b><small>Recorded analyses</small></div>
             <div><span>Feedback records</span><b>{adminOverview?.feedback_records ?? 0}</b><small>Awaiting review or included data</small></div>
@@ -2277,7 +2315,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           </section>
           </>}
 
-          {adminTab === "model" &&
+          {adminOverview && adminTab === "model" &&
           <section className="admin-workspace">
             <div>
               <span className="eyebrow">MODEL DELIVERY / {String(adminOverview?.training_mode || "checking").replace(/_/g," ")}</span>
@@ -2295,7 +2333,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 } catch (error) {
                   setAdminMessage(error instanceof Error ? error.message : "Could not start retraining.");
                 }
-              }}>{adminOverview?.training_mode === "external_gpu" ? "Dispatch GPU training" : "Start reviewed training"}</button> : <div className="training-disabled"><b>GPU worker is not connected yet</b><span>Render remains the inference API. Configure a private training worker webhook to activate one-click training without exposing cloud credentials.</span><code>EXTERNAL_TRAINING_URL=https://your-gpu-worker.example/jobs</code><code>EXTERNAL_TRAINING_TOKEN=server-to-server-secret</code><code>TRAINING_CALLBACK_TOKEN=separate-callback-secret</code></div>}
+              }}>{adminOverview?.training_mode === "external_gpu" ? "Dispatch GPU training" : "Start reviewed training"}</button> : <div className="training-disabled"><b>Training is in review-only mode</b><span>Predictions and approved feedback continue to work. Train approved batches on the local RTX GPU, then use the release gate before deploying a candidate.</span></div>}
               {adminOverview?.retraining?.status === "running" && <p className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</p>}
               {adminOverview?.retraining?.status === "completed" && <p className="admin-live-status"><span className="live-dot" /> Candidate ready. Review its metrics before promotion.</p>}
             </div>
@@ -2310,7 +2348,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </div>
           </section>}
 
-          {adminTab === "feedback" &&
+          {adminOverview && adminTab === "feedback" &&
           <section className="admin-review-queue">
             <div className="admin-section-heading">
               <div><span className="eyebrow">HUMAN REVIEW</span><h2>Pending training feedback</h2></div>
@@ -2341,7 +2379,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             )) : <p className="admin-empty">No feedback is waiting for review.</p>}
           </section>}
 
-          {adminTab === "users" &&
+          {adminOverview && adminTab === "users" &&
           <section className="admin-review-queue admin-users">
             <div className="admin-section-heading">
               <div><span className="eyebrow">ACCESS CONTROL</span><h2>Users and administrator roles</h2></div>
