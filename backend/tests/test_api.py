@@ -1,4 +1,6 @@
+import base64
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -12,9 +14,11 @@ TEST_ROOT = tempfile.TemporaryDirectory()
 os.environ["DATABASE_PATH"] = os.path.join(TEST_ROOT.name, "test.db")
 os.environ["DATA_DIR"] = os.path.join(TEST_ROOT.name, "data")
 os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"] = ""
+os.environ["FIREBASE_SERVICE_ACCOUNT_JSON_B64"] = ""
 os.environ["FIREBASE_SERVICE_ACCOUNT_FILE"] = ""
 os.environ["ENABLE_RETRAINING"] = "false"
 from app.main import app, connection, FABRICS
+from app import firebase_store
 
 class TestLaundryAIAPI(unittest.TestCase):
     @classmethod
@@ -39,6 +43,30 @@ class TestLaundryAIAPI(unittest.TestCase):
         root = self.client.get("/")
         self.assertEqual(root.status_code, 200)
         self.assertEqual(root.json()["health"], "/api/health")
+
+    def test_service_account_base64_loader(self):
+        payload = {
+            "type": "service_account",
+            "project_id": "test-project",
+            "private_key": "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
+            "client_email": "firebase@test-project.iam.gserviceaccount.com",
+        }
+        encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+        with patch.dict(os.environ, {
+            "FIREBASE_SERVICE_ACCOUNT_JSON_B64": encoded,
+            "FIREBASE_SERVICE_ACCOUNT_JSON": "",
+            "FIREBASE_SERVICE_ACCOUNT_FILE": "",
+        }):
+            self.assertEqual(firebase_store.service_account_credential(), payload)
+
+    def test_service_account_base64_loader_rejects_invalid_value(self):
+        with patch.dict(os.environ, {
+            "FIREBASE_SERVICE_ACCOUNT_JSON_B64": "not valid base64!",
+            "FIREBASE_SERVICE_ACCOUNT_JSON": "",
+            "FIREBASE_SERVICE_ACCOUNT_FILE": "",
+        }):
+            with self.assertRaisesRegex(ValueError, "not valid Base64"):
+                firebase_store.service_account_credential()
 
     def test_02_fabrics_list(self):
         response = self.client.get("/api/fabrics")

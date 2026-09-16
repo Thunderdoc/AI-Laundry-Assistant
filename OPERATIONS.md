@@ -51,7 +51,8 @@ per-class recall regression.
 - `CORS_ORIGINS`
 - `FIREBASE_DATABASE_URL`
 - `FIREBASE_STORAGE_BUCKET`
-- `FIREBASE_SERVICE_ACCOUNT_JSON` (the complete valid downloaded JSON object)
+- `FIREBASE_SERVICE_ACCOUNT_JSON_B64` (preferred: one-line Base64 of the complete downloaded JSON file)
+- `FIREBASE_SERVICE_ACCOUNT_JSON` (raw JSON alternative; do not configure both)
 - `MODEL_PATH=backend/models/fabric_mobilenetv2.pt`
 - `PYTHON_VERSION=3.13.7`
 
@@ -66,4 +67,3 @@ Collect diverse, correctly labelled examples—especially underrepresented and
 difficult classes. Keep validation and test images separate from user training
 feedback. Retrain periodically after enough approved samples accumulate, compare
 the candidate against the deployed manifest, and promote only a measured win.
-

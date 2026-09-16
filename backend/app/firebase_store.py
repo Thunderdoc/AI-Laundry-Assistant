@@ -5,6 +5,8 @@ SQLite and the local filesystem remain available for local development/tests.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import uuid
@@ -16,6 +18,49 @@ def _value(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
+def _credential_present() -> bool:
+    return bool(
+        _value("FIREBASE_SERVICE_ACCOUNT_JSON_B64")
+        or _value("FIREBASE_SERVICE_ACCOUNT_JSON")
+        or _value("FIREBASE_SERVICE_ACCOUNT_FILE")
+    )
+
+
+def service_account_credential() -> dict[str, Any] | str:
+    """Load a Firebase credential without logging or returning secret data.
+
+    A one-line Base64 value is preferred on hosting dashboards because it
+    avoids multiline JSON/private-key escaping problems.
+    """
+    encoded = _value("FIREBASE_SERVICE_ACCOUNT_JSON_B64")
+    raw_json = _value("FIREBASE_SERVICE_ACCOUNT_JSON")
+    account_file = _value("FIREBASE_SERVICE_ACCOUNT_FILE")
+    try:
+        if encoded:
+            raw_json = base64.b64decode(encoded, validate=True).decode("utf-8")
+        if raw_json:
+            payload = json.loads(raw_json)
+            # Gracefully handle a JSON object that was accidentally encoded as
+            # a JSON string, while still rejecting Python/single-quoted dicts.
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict) or payload.get("type") != "service_account":
+                raise ValueError("credential is not a Firebase service-account JSON object")
+            required = {"project_id", "private_key", "client_email"}
+            missing = sorted(required - payload.keys())
+            if missing:
+                raise ValueError(f"credential is missing required fields: {', '.join(missing)}")
+            return payload
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON_B64 is not valid Base64-encoded UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        source = "FIREBASE_SERVICE_ACCOUNT_JSON_B64" if encoded else "FIREBASE_SERVICE_ACCOUNT_JSON"
+        raise ValueError(f"{source} does not contain valid JSON") from exc
+    if account_file:
+        return account_file
+    raise ValueError("Firebase service-account credential is missing")
+
+
 def enabled() -> bool:
     mode = _value("PERSISTENCE_BACKEND").lower()
     if mode:
@@ -25,7 +70,7 @@ def enabled() -> bool:
     return bool(
         _value("FIREBASE_DATABASE_URL")
         and _value("FIREBASE_STORAGE_BUCKET")
-        and (_value("FIREBASE_SERVICE_ACCOUNT_JSON") or _value("FIREBASE_SERVICE_ACCOUNT_FILE"))
+        and _credential_present()
     )
 
 
@@ -34,7 +79,7 @@ def configured() -> bool:
         enabled()
         and _value("FIREBASE_DATABASE_URL")
         and _value("FIREBASE_STORAGE_BUCKET")
-        and (_value("FIREBASE_SERVICE_ACCOUNT_JSON") or _value("FIREBASE_SERVICE_ACCOUNT_FILE"))
+        and _credential_present()
     )
 
 
@@ -49,9 +94,7 @@ def _app():
 
     if firebase_admin._apps:
         return firebase_admin.get_app()
-    account_json = _value("FIREBASE_SERVICE_ACCOUNT_JSON")
-    account_file = _value("FIREBASE_SERVICE_ACCOUNT_FILE")
-    credential = credentials.Certificate(json.loads(account_json) if account_json else account_file)
+    credential = credentials.Certificate(service_account_credential())
     return firebase_admin.initialize_app(credential)
 
 
@@ -71,7 +114,7 @@ def status(probe: bool = False) -> dict[str, Any]:
     requirements = {
         "FIREBASE_DATABASE_URL": bool(_value("FIREBASE_DATABASE_URL")),
         "FIREBASE_STORAGE_BUCKET": bool(_value("FIREBASE_STORAGE_BUCKET")),
-        "FIREBASE_SERVICE_ACCOUNT": bool(_value("FIREBASE_SERVICE_ACCOUNT_JSON") or _value("FIREBASE_SERVICE_ACCOUNT_FILE")),
+        "FIREBASE_SERVICE_ACCOUNT": _credential_present(),
     }
     state: dict[str, Any] = {
         "backend": "firebase" if enabled() else "local",

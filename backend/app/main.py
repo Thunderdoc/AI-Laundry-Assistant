@@ -131,13 +131,10 @@ def require_admin(request: Request) -> dict:
     return user
 
 def firebase_admin_auth_client():
-    account_file = os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE", "").strip()
-    account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
     import firebase_admin
     from firebase_admin import auth, credentials
     if not firebase_admin._apps:
-        service_account = json.loads(account_json) if account_json else account_file
-        firebase_admin.initialize_app(credentials.Certificate(service_account))
+        firebase_admin.initialize_app(credentials.Certificate(firebase_store.service_account_credential()))
     return auth
 
 @app.middleware("http")
