@@ -311,23 +311,5 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertIn(f"feedback/{result['id']}", updates)
         self.assertIn("predictions/prediction-1/user_feedback", updates)
 
-    def test_19_admin_recovery_session_is_signed_and_expires(self):
-        from app import main
-        original_emails=main.ADMIN_EMAILS
-        original_key=os.environ.get("ADMIN_RECOVERY_KEY")
-        try:
-            main.ADMIN_EMAILS={"admin@example.com"}
-            os.environ["ADMIN_RECOVERY_KEY"]="test-only-recovery-key-123456789"
-            token=main.create_admin_session("admin@example.com")
-            claims=main.verify_admin_session(token)
-            self.assertTrue(claims["admin"])
-            self.assertEqual(claims["email"],"admin@example.com")
-            with self.assertRaises(Exception):
-                main.verify_admin_session(token+"tampered")
-        finally:
-            main.ADMIN_EMAILS=original_emails
-            if original_key is None: os.environ.pop("ADMIN_RECOVERY_KEY",None)
-            else: os.environ["ADMIN_RECOVERY_KEY"]=original_key
-
 if __name__ == "__main__":
     unittest.main()

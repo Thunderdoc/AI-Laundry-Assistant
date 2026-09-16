@@ -1,4 +1,4 @@
-import base64, csv, hashlib, hmac, io, json, os, shutil, sqlite3, time, uuid
+import csv, io, json, os, shutil, sqlite3, uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -35,10 +35,6 @@ ADMIN_EMAILS = {email.strip().lower() for email in os.getenv("ADMIN_EMAILS", "")
 
 class FirebaseCredential(BaseModel):
     id_token: str
-
-class AdminRecoveryCredential(BaseModel):
-    email: str
-    access_code: str
 
 class AdminRoleUpdate(BaseModel):
     is_admin: bool
@@ -101,40 +97,16 @@ def firebase_admin_auth_client():
         firebase_admin.initialize_app(credentials.Certificate(service_account))
     return auth
 
-def _admin_session_secret() -> str:
-    return os.getenv("ADMIN_SESSION_SECRET", "").strip() or os.getenv("ADMIN_RECOVERY_KEY", "").strip()
-
-def create_admin_session(email: str) -> str:
-    secret=_admin_session_secret()
-    if len(secret)<24: raise HTTPException(503,"Admin recovery is not configured securely.")
-    payload={"uid":f"recovery:{email}","email":email,"email_verified":True,"admin":True,"exp":int(time.time())+3600}
-    encoded=base64.urlsafe_b64encode(json.dumps(payload,separators=(",",":")).encode()).decode().rstrip("=")
-    signature=hmac.new(secret.encode(),encoded.encode(),hashlib.sha256).hexdigest()
-    return f"laundry-admin.{encoded}.{signature}"
-
-def verify_admin_session(token: str) -> dict:
-    secret=_admin_session_secret()
-    try:
-        prefix,encoded,signature=token.split(".",2)
-        expected=hmac.new(secret.encode(),encoded.encode(),hashlib.sha256).hexdigest()
-        if prefix!="laundry-admin" or len(secret)<24 or not hmac.compare_digest(signature,expected): raise ValueError
-        payload=json.loads(base64.urlsafe_b64decode(encoded+"="*(-len(encoded)%4)))
-        if int(payload.get("exp",0))<int(time.time()) or not is_admin(payload): raise ValueError
-        return payload
-    except Exception as exc:
-        raise HTTPException(401,"Admin recovery session is invalid or expired.") from exc
-
 @app.middleware("http")
 async def require_firebase_auth(request: Request, call_next):
     path = request.url.path
-    public_api = {"/api/health", "/api/auth/config", "/api/auth/firebase", "/api/auth/admin-recovery"}
+    public_api = {"/api/health", "/api/auth/config", "/api/auth/firebase"}
     if request.method != "OPTIONS" and firebase_auth_enabled() and path.startswith("/api/") and path not in public_api:
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return Response(status_code=401, content='{"detail":"Sign in is required."}', media_type="application/json")
         try:
-            token=auth_header.removeprefix("Bearer ").strip()
-            request.state.user = verify_admin_session(token) if token.startswith("laundry-admin.") else verify_firebase_token(token)
+            request.state.user = verify_firebase_token(auth_header.removeprefix("Bearer ").strip())
         except HTTPException as exc:
             return Response(status_code=exc.status_code, content=json.dumps({"detail": exc.detail}), media_type="application/json")
     return await call_next(request)
@@ -298,15 +270,6 @@ def firebase_login(payload: FirebaseCredential):
         "picture": user.get("picture"),
         "is_admin": is_admin(user),
     }
-
-@app.post("/api/auth/admin-recovery")
-def admin_recovery(payload: AdminRecoveryCredential):
-    email=payload.email.strip().lower()
-    expected=os.getenv("ADMIN_RECOVERY_KEY", "").strip()
-    if email not in ADMIN_EMAILS or len(expected)<24 or not hmac.compare_digest(payload.access_code,expected):
-        raise HTTPException(401,"Invalid administrator email or recovery code.")
-    token=create_admin_session(email)
-    return {"access_token":token,"expires_in":3600,"user":{"uid":f"recovery:{email}","email":email,"name":"LaundryAI Admin","is_admin":True}}
 
 @app.get("/api/fabrics")
 def fabrics(): return [{"id":k, "properties":v["properties"]} for k,v in FABRICS.items()]
