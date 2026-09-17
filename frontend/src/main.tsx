@@ -2342,7 +2342,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           {(adminTab === "operations" || adminTab === "overview") && <>
           <section className="admin-stats-grid">
             <div><span>Total scans</span><b>{adminOverview?.total_scans ?? history.length}</b><small>Recorded analyses</small></div>
-            <div><span>Feedback records</span><b>{adminOverview?.feedback_records ?? 0}</b><small>Awaiting review or included data</small></div>
+            <div><span>Active users</span><b>{adminUsers.length || "—"}</b><small>Firebase accounts</small></div>
+            <div><span>Pending reviews</span><b>{adminFeedback.length}</b><small>Corrections awaiting approval</small></div>
             <div><span>Dataset samples</span><b>{adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b><small>Across supported classes</small></div>
             <div><span>Model status</span><b>{adminOverview?.model_ready ? "Ready" : "Checking"}</b><small>Live inference availability</small></div>
           </section>
@@ -2481,7 +2482,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       <div className="admin-review-copy">
                         <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
                           <strong style={{ textTransform: "capitalize", fontSize: "14px" }}>{scan.fabric || "Unknown"}</strong>
-                          <span className="admin-badge ok" style={{ fontSize: "10px" }}>{Math.round((scan.confidence || 0) * 100)}% confidence</span>
+                          <span className="admin-badge ok" style={{ fontSize: "10px" }}>{Math.round(scan.confidence || 0)}% confidence</span>
                           {scan.user_feedback ? (
                             scan.user_feedback.was_correct ? (
                               <span className="admin-badge ok" style={{ fontSize: "10px" }}>✓ User confirmed</span>
