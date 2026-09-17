@@ -9,6 +9,8 @@ import base64
 import binascii
 import json
 import os
+import queue
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -61,6 +63,53 @@ def service_account_credential() -> dict[str, Any] | str:
     raise ValueError("Firebase service-account credential is missing")
 
 
+def credential_status() -> dict[str, Any]:
+    """Return a non-secret, stable description of credential readiness."""
+    source = (
+        "base64-json" if _value("FIREBASE_SERVICE_ACCOUNT_JSON_B64")
+        else "raw-json" if _value("FIREBASE_SERVICE_ACCOUNT_JSON")
+        else "file" if _value("FIREBASE_SERVICE_ACCOUNT_FILE")
+        else "none"
+    )
+    if source == "none":
+        return {"present": False, "valid": False, "source": source, "error_code": "credential_missing"}
+    try:
+        credential = service_account_credential()
+        if isinstance(credential, str) and not os.path.isfile(credential):
+            return {"present": True, "valid": False, "source": source, "error_code": "credential_file_not_found"}
+        return {"present": True, "valid": True, "source": source, "error_code": None}
+    except ValueError as exc:
+        message = str(exc)
+        if "Base64" in message:
+            code = "invalid_service_account_base64"
+        elif "valid JSON" in message:
+            code = "invalid_service_account_json"
+        else:
+            code = "invalid_service_account"
+        return {"present": True, "valid": False, "source": source, "error_code": code}
+
+
+def call_with_timeout(operation, timeout: float | None = None):
+    """Bound a blocking Firebase SDK operation without exposing its details."""
+    seconds = timeout if timeout is not None else float(_value("FIREBASE_OPERATION_TIMEOUT") or "8")
+    result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+    def invoke() -> None:
+        try:
+            result.put((True, operation()))
+        except BaseException as exc:  # propagate the original exception to the caller
+            result.put((False, exc))
+
+    threading.Thread(target=invoke, daemon=True, name="firebase-operation").start()
+    try:
+        ok, value = result.get(timeout=max(0.1, seconds))
+    except queue.Empty as exc:
+        raise TimeoutError(f"Firebase operation exceeded {seconds:g} seconds") from exc
+    if ok:
+        return value
+    raise value
+
+
 def enabled() -> bool:
     mode = _value("PERSISTENCE_BACKEND").lower()
     if mode:
@@ -75,11 +124,12 @@ def enabled() -> bool:
 
 
 def configured() -> bool:
+    credential = credential_status()
     return bool(
         enabled()
         and _value("FIREBASE_DATABASE_URL")
         and _value("FIREBASE_STORAGE_BUCKET")
-        and _credential_present()
+        and credential["valid"]
     )
 
 
@@ -104,17 +154,50 @@ def _root(path: str):
     return db.reference(path, app=_app(), url=_value("FIREBASE_DATABASE_URL"))
 
 
+def _clean_bucket_name(raw: str) -> str:
+    name = (raw or "").strip()
+    if name.startswith("gs://"):
+        name = name[5:]
+    return name.strip("/").strip()
+
+
+def _candidate_bucket_names() -> list[str]:
+    configured_name = _clean_bucket_name(_value("FIREBASE_STORAGE_BUCKET"))
+    names = [configured_name] if configured_name else []
+    try:
+        cred = service_account_credential()
+        if isinstance(cred, dict):
+            pid = (cred.get("project_id") or "").strip()
+            if pid:
+                for candidate in (f"{pid}.firebasestorage.app", f"{pid}.appspot.com"):
+                    if candidate and candidate not in names:
+                        names.append(candidate)
+    except Exception:
+        pass
+    return names
+
+
+_ACTIVE_BUCKET_NAME: str | None = None
+
+
 def _bucket():
+    global _ACTIVE_BUCKET_NAME
     from firebase_admin import storage
 
-    return storage.bucket(name=_value("FIREBASE_STORAGE_BUCKET"), app=_app())
+    if _ACTIVE_BUCKET_NAME:
+        return storage.bucket(name=_ACTIVE_BUCKET_NAME, app=_app())
+    candidates = _candidate_bucket_names()
+    primary = candidates[0] if candidates else _clean_bucket_name(_value("FIREBASE_STORAGE_BUCKET"))
+    return storage.bucket(name=primary, app=_app())
 
 
 def status(probe: bool = False) -> dict[str, Any]:
+    global _ACTIVE_BUCKET_NAME
+    credential = credential_status()
     requirements = {
         "FIREBASE_DATABASE_URL": bool(_value("FIREBASE_DATABASE_URL")),
         "FIREBASE_STORAGE_BUCKET": bool(_value("FIREBASE_STORAGE_BUCKET")),
-        "FIREBASE_SERVICE_ACCOUNT": _credential_present(),
+        "FIREBASE_SERVICE_ACCOUNT": credential["valid"],
     }
     state: dict[str, Any] = {
         "backend": "firebase" if enabled() else "local",
@@ -124,25 +207,58 @@ def status(probe: bool = False) -> dict[str, Any]:
         "selection": _value("PERSISTENCE_BACKEND").lower() or "auto",
     }
     if enabled():
-        state["credential_source"] = (
-            "base64-json" if _value("FIREBASE_SERVICE_ACCOUNT_JSON_B64")
-            else "raw-json" if _value("FIREBASE_SERVICE_ACCOUNT_JSON")
-            else "file" if _value("FIREBASE_SERVICE_ACCOUNT_FILE")
-            else "none"
-        )
+        state["credential_source"] = credential["source"]
+        state["credential_valid"] = credential["valid"]
+        if credential["error_code"]:
+            state["configuration_error"] = credential["error_code"]
     if enabled() and not state["configured"]:
         state["firebase_missing"] = [name for name, present in requirements.items() if not present]
     elif not enabled():
         state["firebase_missing"] = [name for name, present in requirements.items() if not present]
     if probe and enabled() and state["configured"]:
+        db_ok = False
+        db_err = None
+        storage_ok = False
+        storage_err = None
+
+        # Realtime Database probe
         try:
-            _root("system/persistenceProbe").get()
-            if not _bucket().exists():
-                raise RuntimeError("Configured Firebase Storage bucket does not exist.")
-            state["reachable"] = True
+            def probe_db():
+                _root("system/persistenceProbe").get()
+            call_with_timeout(probe_db, timeout=5.0)
+            db_ok = True
         except Exception as exc:
-            state["reachable"] = False
-            state["error"] = type(exc).__name__
+            db_err = "firebase_timeout" if isinstance(exc, TimeoutError) else type(exc).__name__
+
+        # Firebase Storage probe with candidate bucket fallback
+        try:
+            def probe_storage():
+                global _ACTIVE_BUCKET_NAME
+                from firebase_admin import storage
+                for name in _candidate_bucket_names():
+                    try:
+                        b = storage.bucket(name=name, app=_app())
+                        if b.exists():
+                            _ACTIVE_BUCKET_NAME = name
+                            return True
+                    except Exception:
+                        continue
+                return False
+            storage_ok = bool(call_with_timeout(probe_storage, timeout=6.0))
+        except Exception as exc:
+            storage_err = "storage_timeout" if isinstance(exc, TimeoutError) else type(exc).__name__
+
+        state["database_reachable"] = db_ok
+        state["storage_reachable"] = storage_ok
+        state["database_error"] = db_err
+        state["storage_error"] = storage_err
+        if _ACTIVE_BUCKET_NAME:
+            state["active_bucket"] = _ACTIVE_BUCKET_NAME
+        state["reachable"] = db_ok
+        if not db_ok:
+            state["error"] = db_err or "firebase_unreachable"
+        elif not storage_ok:
+            state["storage_warning"] = "storage_bucket_unavailable"
     return state
 
 
@@ -155,7 +271,7 @@ def training_export_reference() -> dict[str, Any]:
     if configured():
         return {
             "provider": "firebase-storage",
-            "bucket": _value("FIREBASE_STORAGE_BUCKET"),
+            "bucket": _ACTIVE_BUCKET_NAME or _clean_bucket_name(_value("FIREBASE_STORAGE_BUCKET")),
             "prefix": "training-approved/",
             "portable": True,
         }
@@ -167,16 +283,22 @@ def training_export_reference() -> dict[str, Any]:
 def create_prediction(owner_uid: str, record: dict[str, Any], jpeg: bytes) -> dict[str, Any]:
     record_id = uuid.uuid4().hex
     storage_path = f"private-uploads/{owner_uid}/{record_id}.jpg"
-    blob = _bucket().blob(storage_path)
-    blob.upload_from_string(jpeg, content_type="image/jpeg")
+    blob = None
+    try:
+        blob = _bucket().blob(storage_path)
+        blob.upload_from_string(jpeg, content_type="image/jpeg")
+    except Exception:
+        storage_path = None
+        blob = None
     saved = {**record, "id": record_id, "image_token": storage_path, "owner_uid": owner_uid}
     try:
         _root(f"predictions/{record_id}").set(saved)
     except Exception:
-        try:
-            blob.delete()
-        except Exception:
-            pass
+        if blob is not None:
+            try:
+                blob.delete()
+            except Exception:
+                pass
         raise
     return saved
 

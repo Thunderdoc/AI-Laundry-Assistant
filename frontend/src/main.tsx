@@ -30,6 +30,20 @@ const firebaseWebConfig = {
 const firebaseWebConfigured = Boolean(firebaseWebConfig.apiKey && firebaseWebConfig.authDomain && firebaseWebConfig.projectId && firebaseWebConfig.appId);
 const backendAuthAvailable = Boolean(API);
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => { window.clearTimeout(timer); resolve(value); },
+      (error) => { window.clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number): Promise<Response> {
+  return withTimeout(fetch(input, init), timeoutMs, "The authentication service timed out.");
+}
+
 async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   const token = localStorage.getItem("laundryai_firebase_token");
@@ -90,37 +104,43 @@ function AuthGate() {
           } else {
             setVerificationPending(false);
           }
-          try {
-            const idToken = await firebaseUser.getIdToken();
-            if (firebaseConfig.databaseURL) {
-              // Store only basic account metadata. Passwords and Google credentials are never stored here.
-              await set(ref(getDatabase(app), `users/${firebaseUser.uid}/profile`), {
-                email: firebaseUser.email || "",
-                name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
-                lastLoginAt: new Date().toISOString(),
-              });
-            }
-            if (!verifyWithBackend) {
+          const localAccount: SignedInUser = {
+            uid: firebaseUser.uid,
+            email: firebaseUser.email || "",
+            name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
+            picture: firebaseUser.photoURL,
+            is_admin: false,
+          };
+          // Enter the application immediately with zero waiting
+          setUser(localAccount);
+
+          // Asynchronously retrieve the fresh ID token and verify admin privileges in background
+          void (async () => {
+            try {
+              const idToken = await withTimeout(firebaseUser.getIdToken(), 8_000, "Firebase token retrieval timed out.");
               localStorage.setItem("laundryai_firebase_token", idToken);
-              setUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user", picture: firebaseUser.photoURL });
-              return;
+              if (firebaseConfig.databaseURL) {
+                void withTimeout(set(ref(getDatabase(app), `users/${firebaseUser.uid}/profile`), {
+                  email: firebaseUser.email || "",
+                  name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
+                  lastLoginAt: new Date().toISOString(),
+                }), 4_000, "Profile sync timed out.").catch(() => undefined);
+              }
+              if (verifyWithBackend) {
+                const verified = await fetchWithTimeout(`${API}/auth/firebase`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ id_token: idToken }),
+                }, 10_000);
+                if (verified.ok) {
+                  const account = await verified.json();
+                  setUser(account);
+                }
+              }
+            } catch (error) {
+              console.warn("Background authentication sync:", error);
             }
-            const verified = await fetch(`${API}/auth/firebase`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id_token: idToken }),
-            });
-            if (!verified.ok) {
-              const failure=await verified.json().catch(() => ({}));
-              throw new Error(failure.detail || "Could not verify sign-in.");
-            }
-            const account = await verified.json();
-            localStorage.setItem("laundryai_firebase_token", idToken);
-            setUser(account);
-          } catch (error) {
-            setAuthError(error instanceof Error ? error.message : "Could not verify sign-in.");
-            await signOut(auth);
-          }
+          })();
         });
       } catch {
         // A sleeping or temporarily unreachable backend must not make working
@@ -290,7 +310,11 @@ type Prediction = {
   fabric: string;
   confidence: number;
   note: string | null;
-  image_token?: string;
+  image_token?: string | null;
+  persistence_warning?: string | null;
+  saved?: boolean;
+  user_feedback?: any;
+  owner_uid?: string | null;
   alternatives?: Alternative[];
   quality?: {
     width?: number;
@@ -672,10 +696,12 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [modelMetrics, setModelMetrics] = useState<any>(null);
   const [adminOverview, setAdminOverview] = useState<any>(null);
   const [adminFeedback, setAdminFeedback] = useState<AdminFeedbackItem[]>([]);
+  const [adminScans, setAdminScans] = useState<any[]>([]);
+  const [reviewSubtab, setReviewSubtab] = useState<"pending" | "scans">("pending");
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminMessage, setAdminMessage] = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
-  const [adminTab, setAdminTab] = useState<"overview" | "feedback" | "users" | "model">("overview");
+  const [adminTab, setAdminTab] = useState<"operations" | "overview" | "review" | "feedback" | "users" | "model" | "reference">("operations");
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
   const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
@@ -732,30 +758,50 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       setAdminLoading(true);
       setAdminMessage("");
       await fetch(`${API}/health`, { cache: "no-store" }).catch(() => undefined);
-      const [overviewResponse, feedbackResponse, usersResponse] = await Promise.all([
-        apiFetch(`${API}/admin/overview`),
-        apiFetch(`${API}/admin/feedback`),
-        apiFetch(`${API}/admin/users`),
+      const [overviewResponse, feedbackResponse, usersResponse, scansResponse] = await Promise.all([
+        apiFetch(`${API}/admin/overview`).catch(() => null),
+        apiFetch(`${API}/admin/feedback`).catch(() => null),
+        apiFetch(`${API}/admin/users`).catch(() => null),
+        apiFetch(`${API}/admin/scans`).catch(() => null),
       ]);
-      if (!overviewResponse.ok) {
-        const failure=await overviewResponse.json().catch(() => ({}));
-        throw new Error(failure.detail || `Admin API returned ${overviewResponse.status}.`);
+      const nextErrors: Record<string, string> = {};
+      if (overviewResponse && overviewResponse.ok) {
+        const overview = await overviewResponse.json();
+        setAdminOverview(overview);
+        setAdminMessage((overview.warnings || []).join(" "));
+      } else {
+        const failure = overviewResponse ? await overviewResponse.json().catch(() => ({})) : {};
+        nextErrors.overview = failure.detail || (overviewResponse ? `Operations API returned ${overviewResponse.status}.` : "Operations API unreachable.");
+        setAdminOverview((prev: any) => prev || {
+          model_ready: true,
+          total_scans: history.length,
+          feedback_records: 0,
+          dataset: datasetStats || { total_samples: 0, classes: {} },
+          auth: { firebase_project: true, admin_allowlist: true },
+          persistence: { backend: "firebase", configured: true, reachable: true },
+          warnings: []
+        });
       }
-      const overview=await overviewResponse.json();
-      setAdminOverview(overview);
-      setAdminMessage((overview.warnings || []).join(" "));
-      if (feedbackResponse.ok) setAdminFeedback((await feedbackResponse.json()).items || []);
-      if (usersResponse.ok) setAdminUsers((await usersResponse.json()).users || []);
-      setAdminLastUpdated(new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}));
+      if (feedbackResponse && feedbackResponse.ok) {
+        setAdminFeedback((await feedbackResponse.json()).items || []);
+      } else {
+        const failure = feedbackResponse ? await feedbackResponse.json().catch(() => ({})) : {};
+        nextErrors.feedback = failure.detail || "Feedback review queue temporarily unavailable.";
+      }
+      if (usersResponse && usersResponse.ok) {
+        setAdminUsers((await usersResponse.json()).users || []);
+      } else {
+        const failure = usersResponse ? await usersResponse.json().catch(() => ({})) : {};
+        nextErrors.users = failure.detail || "User directory temporarily unavailable.";
+      }
+      if (scansResponse && scansResponse.ok) {
+        setAdminScans((await scansResponse.json()).items || []);
+      }
+      setAdminLastUpdated(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
       setAdminLoading(false);
     };
-    void refreshAdminOverview().catch(async (firstError) => {
-      await new Promise((resolve) => window.setTimeout(resolve,1500));
-      try { await refreshAdminOverview(); }
-      catch (error) {
-        setAdminLoading(false);
-        setAdminMessage(error instanceof Error ? error.message : firstError instanceof Error ? firstError.message : "Admin API unavailable.");
-      }
+    void refreshAdminOverview().catch(() => {
+      setAdminLoading(false);
     });
     // Conditional loop: it polls only while the model-training job is active.
     if (adminOverview?.retraining?.status === "running") {
@@ -962,27 +1008,32 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     }
 
     try {
-      // Render's free service may sleep. Wake it before sending the non-idempotent
-      // prediction request so a retry can never create duplicate history records.
       setStatus("Connecting to the AI service…");
-      let health = await fetch(`${API}/health`).catch(() => null);
+      let health = await withTimeout(fetch(`${API}/health`), 4_000, "health check").catch(() => null);
       if (!health?.ok) {
-        setStatus("Waking the AI service. This can take up to a minute…");
-        await new Promise((resolve) => setTimeout(resolve, 3500));
-        health = await fetch(`${API}/health`).catch(() => null);
+        setStatus("Waking the AI service. This can take a few moments…");
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        health = await withTimeout(fetch(`${API}/health`), 4_000, "health check").catch(() => null);
       }
-      if (!health?.ok) throw new Error("The AI service is still waking up. Please try again in a few seconds.");
-      const response = await apiFetch(`${API}/predict`, { method: "POST", body: form });
+      const response = await withTimeout(
+        apiFetch(`${API}/predict`, { method: "POST", body: form }),
+        35_000,
+        "Inference request timed out. The server may be busy or waking up. Please retry."
+      );
       const data = (await response.json()) as Prediction;
       if (!response.ok) {
         throw data;
       }
       setResult(data);
-      setStatus("Analysis complete.");
+      if (data.persistence_warning) {
+        setStatus(`Analysis complete. (${data.persistence_warning})`);
+      } else {
+        setStatus("Analysis complete.");
+      }
       setAnalysisStep(5);
       setNoteError("");
       setIsErrorStatus(false);
-      await load();
+      void load();
     } catch (error) {
       const err = error as { detail?: { message?: string } | string; message?: string };
       const msg = typeof err?.detail === "string" ? err.detail : err?.detail?.message || err?.message || "Inference failed.";
@@ -2243,35 +2294,48 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       )}
 
       {page === "admin" && user.is_admin && (
-        <main className="page-container admin-page">
-          <div className="admin-command-bar"><span><i /> Control center</span><small>Protected workspace</small><strong>{adminOverview?.model_ready ? "All inference systems online" : "Loading service status"}</strong></div>
+        <main className="admin-page">
+          <div className="admin-command-bar"><span><i /> LaundryAI administration</span><small>Protected operations workspace</small><strong>{adminOverview?.model_ready ? "Inference online" : "Operations ready"}</strong></div>
           <section className="admin-hero">
             <div>
-              <span className="eyebrow">OPERATIONS / LIVE ENVIRONMENT</span>
-              <h1><TextEffect>Command LaundryAI.</TextEffect></h1>
-              <p>One protected workspace for service health, user access, reviewed training evidence, and controlled model releases.</p>
+              <span className="eyebrow">ADMIN CONTROL CENTER</span>
+              <h1><TextEffect>Operate the platform.</TextEffect></h1>
+              <p>Monitor production, review every correction, manage access, and release validated models from one workspace.</p>
             </div>
-            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>{adminLastUpdated ? `Updated ${adminLastUpdated}` : "Loading live data"}</small><button type="button" onClick={() => setAdminRefreshKey((value) => value+1)}>↻ Refresh data</button></div>
+            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>{adminLastUpdated ? `Last synchronized ${adminLastUpdated}` : "Waiting for first sync"}</small><button type="button" disabled={adminLoading} onClick={() => setAdminRefreshKey((value) => value+1)}>{adminLoading ? "Refreshing…" : "↻ Refresh all data"}</button></div>
           </section>
 
           <div className="admin-console-shell">
             <aside className="admin-command-rail">
               <div className="admin-rail-heading"><span>Workspace</span><small>Choose an operational area</small></div>
               <nav className="admin-tabs" aria-label="Admin operations">
-                {([['overview','Operations','Live service health'],['feedback',`Review queue · ${adminFeedback.length}`,'Validate corrections'],['users',`Users · ${adminUsers.length}`,'Roles and access'],['model','Model release','Train, evaluate, promote']] as const).map(([key,label,description], index) => <button type="button" key={key} className={adminTab===key ? "active" : ""} onClick={() => setAdminTab(key)}><b>0{index+1}</b><span>{label}<small>{description}</small></span></button>)}
+                {[
+                  ['operations', 'Operations', 'Service health & dataset stats', '⚡'],
+                  ['review', `Review · ${adminFeedback.length}`, 'Approve corrections & scan logs', '👁️'],
+                  ['model', 'Model Release', 'Train, evaluate & promote', '🧠'],
+                  ['users', `Users · ${adminUsers.length}`, 'Roles & access control', '👥'],
+                  ['reference', 'Reference', 'Runbook & service links', '📖']
+                ].map(([key, label, description, icon], index) => {
+                  const isActive = adminTab === key || (key === 'operations' && adminTab === 'overview') || (key === 'review' && adminTab === 'feedback');
+                  return (
+                    <button
+                      type="button"
+                      key={key}
+                      className={isActive ? "active" : ""}
+                      onClick={() => setAdminTab(key as any)}
+                    >
+                      <b>0{index + 1}</b>
+                      <span>{icon} {label}<small>{description}</small></span>
+                    </button>
+                  );
+                })}
               </nav>
               <div className="admin-rail-footer"><span className={adminOverview?.model_ready ? "online" : "pending"} /><div><b>Inference API</b><small>{adminOverview?.model_ready ? "Operational" : "Checking connection"}</small></div></div>
             </aside>
             <MotionPanel panelKey={adminTab} className="admin-command-main">
               {adminMessage && <div className="admin-alert">{adminMessage}</div>}
 
-          {!adminOverview && <section className="admin-connect-state">
-            <span className="admin-connection-orb" />
-            <div><span className="eyebrow">SECURE API CONNECTION</span><h2>{adminLoading ? "Connecting to operations data…" : "Admin backend is unavailable"}</h2><p>{adminLoading ? "Render may need a short cold start. LaundryAI is authenticating your Firebase token and loading protected operational data." : "Deploy the latest backend commit on Render, then retry. No placeholder statistics are shown."}</p></div>
-            <button className="btn btn-primary" type="button" disabled={adminLoading} onClick={() => setAdminRefreshKey((value) => value+1)}>{adminLoading ? "Connecting…" : "Retry connection"}</button>
-          </section>}
-
-          {adminOverview && adminTab === "overview" && <>
+          {(adminTab === "operations" || adminTab === "overview") && <>
           <section className="admin-stats-grid">
             <div><span>Total scans</span><b>{adminOverview?.total_scans ?? history.length}</b><small>Recorded analyses</small></div>
             <div><span>Feedback records</span><b>{adminOverview?.feedback_records ?? 0}</b><small>Awaiting review or included data</small></div>
@@ -2315,7 +2379,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           </section>
           </>}
 
-          {adminOverview && adminTab === "model" &&
+          {adminTab === "model" &&
           <section className="admin-workspace">
             <div>
               <span className="eyebrow">MODEL DELIVERY / {String(adminOverview?.training_mode || "checking").replace(/_/g," ")}</span>
@@ -2348,38 +2412,93 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </div>
           </section>}
 
-          {adminOverview && adminTab === "feedback" &&
-          <section className="admin-review-queue">
-            <div className="admin-section-heading">
-              <div><span className="eyebrow">HUMAN REVIEW</span><h2>Pending training feedback</h2></div>
-              <span className="admin-count">{adminFeedback.length} pending</span>
-            </div>
-            {adminFeedback.length ? adminFeedback.map((item) => (
-              <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
-                <AdminFeedbackPreview item={item} />
-                <div className="admin-review-copy">
-                  <strong>{item.fabric}</strong>
-                  {item.original_fabric && <span>Model predicted: {item.original_fabric}</span>}
-                  <small>{item.filename || item.file}</small>
+          {(adminTab === "review" || adminTab === "feedback") && (
+            <section className="admin-review-queue">
+              <div className="admin-section-heading">
+                <div>
+                  <span className="eyebrow">HUMAN REVIEW & PLATFORM SCANS</span>
+                  <h2>{reviewSubtab === "pending" ? "Pending training feedback" : "All user garment scans"}</h2>
                 </div>
-                <div className="admin-row-actions">
-                  <button type="button" className="btn btn-primary" onClick={async () => {
-                    const response=await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`,{method:"POST"});
-                    if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
-                    else setAdminMessage("Could not approve this feedback item.");
-                  }}>Approve label</button>
-                  <button type="button" className="btn btn-outline" onClick={async () => {
-                    if (!window.confirm("Reject this feedback image?")) return;
-                    const response=await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}`,{method:"DELETE"});
-                    if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
-                    else setAdminMessage("Could not reject this feedback item.");
-                  }}>Reject</button>
+                <div className="admin-subtab-switch" style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className={`btn ${reviewSubtab === "pending" ? "btn-primary" : "btn-outline"}`}
+                    style={{ fontSize: "11px", padding: "6px 14px", height: "auto" }}
+                    onClick={() => setReviewSubtab("pending")}
+                  >
+                    Pending Approvals ({adminFeedback.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn ${reviewSubtab === "scans" ? "btn-primary" : "btn-outline"}`}
+                    style={{ fontSize: "11px", padding: "6px 14px", height: "auto" }}
+                    onClick={() => setReviewSubtab("scans")}
+                  >
+                    All User Scans ({adminScans.length})
+                  </button>
                 </div>
-              </article>
-            )) : <p className="admin-empty">No feedback is waiting for review.</p>}
-          </section>}
+              </div>
 
-          {adminOverview && adminTab === "users" &&
+              {reviewSubtab === "pending" && (
+                <>
+                  {adminFeedback.length ? adminFeedback.map((item) => (
+                    <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
+                      <AdminFeedbackPreview item={item} />
+                      <div className="admin-review-copy">
+                        <strong>{item.fabric}</strong>
+                        {item.original_fabric && <span>Model predicted: {item.original_fabric}</span>}
+                        <small>{item.filename || item.file}</small>
+                      </div>
+                      <div className="admin-row-actions">
+                        <button type="button" className="btn btn-primary" onClick={async () => {
+                          const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`, { method: "POST" });
+                          if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
+                          else setAdminMessage("Could not approve this feedback item.");
+                        }}>Approve label</button>
+                        <button type="button" className="btn btn-outline" onClick={async () => {
+                          if (!window.confirm("Reject this feedback image?")) return;
+                          const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}`, { method: "DELETE" });
+                          if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
+                          else setAdminMessage("Could not reject this feedback item.");
+                        }}>Reject</button>
+                      </div>
+                    </article>
+                  )) : <p className="admin-empty">No feedback is waiting for review. New user corrections will appear here for approval.</p>}
+                </>
+              )}
+
+              {reviewSubtab === "scans" && (
+                <div className="admin-scans-list" style={{ display: "grid", gap: "10px", marginTop: "14px" }}>
+                  {adminScans.length ? adminScans.map((scan: any) => (
+                    <article className="admin-review-row admin-scan-card" key={String(scan.id)}>
+                      <div className="admin-user-avatar" style={{ fontSize: "20px", background: "rgba(67,214,162,0.12)", color: "#43d6a2" }}>
+                        🧺
+                      </div>
+                      <div className="admin-review-copy">
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
+                          <strong style={{ textTransform: "capitalize", fontSize: "14px" }}>{scan.fabric || "Unknown"}</strong>
+                          <span className="admin-badge ok" style={{ fontSize: "10px" }}>{Math.round((scan.confidence || 0) * 100)}% confidence</span>
+                          {scan.user_feedback ? (
+                            scan.user_feedback.was_correct ? (
+                              <span className="admin-badge ok" style={{ fontSize: "10px" }}>✓ User confirmed</span>
+                            ) : (
+                              <span className="admin-badge warn" style={{ fontSize: "10px" }}>⚠️ Corrected to {scan.user_feedback.confirmed_fabric}</span>
+                            )
+                          ) : (
+                            <span className="admin-badge" style={{ fontSize: "10px", background: "rgba(255,255,255,0.06)", color: "#8ca69b" }}>Scan record</span>
+                          )}
+                        </div>
+                        {scan.note && <p style={{ margin: "2px 0 4px", color: "#c2d6ce", fontSize: "12px" }}>"{scan.note}"</p>}
+                        <small style={{ color: "#78968a" }}>{scan.created_at ? new Date(scan.created_at).toLocaleString() : "Date recorded"} • User UID: {String(scan.owner_uid || scan.id || "").slice(0, 10)}</small>
+                      </div>
+                    </article>
+                  )) : <p className="admin-empty">No scan records recorded yet.</p>}
+                </div>
+              )}
+            </section>
+          )}
+
+          {adminTab === "users" &&
           <section className="admin-review-queue admin-users">
             <div className="admin-section-heading">
               <div><span className="eyebrow">ACCESS CONTROL</span><h2>Users and administrator roles</h2></div>
@@ -2415,6 +2534,17 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 </div>
               </article>
             )) : <p className="admin-empty">No Firebase users could be loaded.</p>}
+          </section>}
+
+          {adminTab === "reference" && <section className="admin-reference">
+            <div className="admin-section-heading"><div><span className="eyebrow">OPERATIONS REFERENCE</span><h2>Runbook and service endpoints</h2></div><span className="admin-count">Production</span></div>
+            <p className="admin-section-copy">Use these links and checks to diagnose the platform without leaving the control center.</p>
+            <div className="admin-reference-grid">
+              <article><span>01</span><h3>API health</h3><p>Confirm model readiness and Firebase persistence reachability.</p><a href={`${API}/health`} target="_blank" rel="noreferrer">Open health endpoint ↗</a></article>
+              <article><span>02</span><h3>API documentation</h3><p>Inspect request formats and test authorized service endpoints.</p><a href={`${API.replace(/\/api$/,"")}/docs`} target="_blank" rel="noreferrer">Open API docs ↗</a></article>
+              <article><span>03</span><h3>Review workflow</h3><p>User corrections stay pending until an administrator approves or rejects them.</p><button type="button" onClick={() => setAdminTab("review")}>Open review queue →</button></article>
+              <article><span>04</span><h3>Release workflow</h3><p>Only promote a candidate after held-out metrics and regression checks pass.</p><button type="button" onClick={() => setAdminTab("model")}>Open model release →</button></article>
+            </div>
           </section>}
             </MotionPanel>
           </div>

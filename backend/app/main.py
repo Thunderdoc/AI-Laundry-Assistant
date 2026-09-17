@@ -183,7 +183,7 @@ def saved_history(owner_uid: str | None = None):
         if not firebase_store.configured():
             raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
         try:
-            return firebase_store.list_predictions(owner_uid)
+            return firebase_store.call_with_timeout(lambda: firebase_store.list_predictions(owner_uid))
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     with connection() as db:
@@ -420,17 +420,27 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
     }
     owner_uid=request_uid(request)
     if firebase_store.enabled():
+        persistence_warning=None
         if not firebase_store.configured():
-            raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
-        try:
-            record=firebase_store.create_prediction(owner_uid, record, normalized_bytes)
-        except Exception as exc:
-            raise HTTPException(503, "Could not save the prediction securely.") from exc
+            persistence_warning="Prediction completed, but cloud history is unavailable because Firebase persistence is not configured."
+        else:
+            try:
+                record=firebase_store.call_with_timeout(
+                    lambda: firebase_store.create_prediction(owner_uid, record, normalized_bytes)
+                )
+            except Exception:
+                persistence_warning="Prediction completed, but cloud history could not be saved. Try again later."
+        if persistence_warning:
+            # Never retain an image token when its protected upload failed.
+            record.update({"id":None,"image_token":None,"saved":False,"feedback_available":False,"persistence_warning":persistence_warning})
+        else:
+            record.update({"saved":True,"feedback_available":True,"persistence_warning":None})
     else:
         with connection() as db:
             cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(owner_uid,record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
             record["id"]=cursor.lastrowid
             db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
+        record.update({"saved":True,"feedback_available":True,"persistence_warning":None})
     return record
 
 @app.post("/api/feedback", summary="Human-in-the-loop active learning feedback")
@@ -632,20 +642,27 @@ def admin_overview(request: Request):
     admin = require_admin(request)
     state=model_status()
     training=training_configuration()
-    persistence=firebase_store.status(probe=True)
+    # Health already performs the network probe. The admin overview must load
+    # promptly even while Firebase is down or credentials are being repaired.
+    persistence=firebase_store.status(probe=False)
     warnings_list=[]
     try:
         history=saved_history()
     except HTTPException:
         history=[]
-        warnings_list.append("Firebase data is unavailable. Replace the malformed service-account JSON in Render.")
+        warnings_list.append("Cloud scan history is currently unavailable.")
     try:
         dataset=dataset_stats()
     except HTTPException:
         dataset=local_dataset_stats()
         warnings_list.append("Cloud-approved training samples could not be counted.")
-    if persistence.get("reachable") is False:
-        warnings_list.append(f"Persistence health check failed ({persistence.get('error','configuration error')}).")
+    if not persistence.get("configured"):
+        missing=persistence.get("firebase_missing") or []
+        code=persistence.get("configuration_error")
+        if missing:
+            warnings_list.append("Firebase setup needs attention: " + ", ".join(missing) + ".")
+        elif code:
+            warnings_list.append("Firebase credentials need attention (" + str(code) + ").")
     feedback_count=sum(1 for item in history if item.get("user_feedback"))
     manifest=load_manifest()
     return {
@@ -726,6 +743,18 @@ def update_user_status(uid: str, payload: UserStatusUpdate, request: Request):
         raise
     except Exception as exc:
         raise HTTPException(503,"Could not update the user status.") from exc
+
+@app.get("/api/admin/scans")
+def admin_scans(request: Request, limit: int = 100):
+    require_admin(request)
+    limit = max(1, min(limit, 500))
+    try:
+        scans = saved_history()
+        return {"count": len(scans), "items": scans[:limit]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, "Cloud scan history is temporarily unavailable.") from exc
 
 @app.get("/api/admin/feedback")
 def admin_feedback(request: Request):

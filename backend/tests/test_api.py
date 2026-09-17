@@ -433,5 +433,16 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertFalse(incomplete["available"])
         self.assertIn("TRAINING_CALLBACK_TOKEN",incomplete["missing"])
 
+    def test_21_admin_scans(self):
+        from app import main
+        with patch.object(main, "require_admin", return_value={"uid":"admin-1", "is_admin":True}), patch.object(
+            main, "saved_history", return_value=[{"id": 1, "fabric": "cotton", "confidence": 0.95}]
+        ):
+            res = self.client.get("/api/admin/scans")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data["count"], 1)
+            self.assertEqual(data["items"][0]["fabric"], "cotton")
+
 if __name__ == "__main__":
     unittest.main()
