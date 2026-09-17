@@ -700,6 +700,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [reviewSubtab, setReviewSubtab] = useState<"pending" | "scans">("pending");
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminMessage, setAdminMessage] = useState("");
+  const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminTab, setAdminTab] = useState<"operations" | "overview" | "review" | "feedback" | "users" | "model" | "reference">("operations");
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
@@ -772,15 +773,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       } else {
         const failure = overviewResponse ? await overviewResponse.json().catch(() => ({})) : {};
         nextErrors.overview = failure.detail || (overviewResponse ? `Operations API returned ${overviewResponse.status}.` : "Operations API unreachable.");
-        setAdminOverview((prev: any) => prev || {
-          model_ready: true,
-          total_scans: history.length,
-          feedback_records: 0,
-          dataset: datasetStats || { total_samples: 0, classes: {} },
-          auth: { firebase_project: true, admin_allowlist: true },
-          persistence: { backend: "firebase", configured: true, reachable: true },
-          warnings: []
-        });
       }
       if (feedbackResponse && feedbackResponse.ok) {
         setAdminFeedback((await feedbackResponse.json()).items || []);
@@ -796,7 +788,11 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       }
       if (scansResponse && scansResponse.ok) {
         setAdminScans((await scansResponse.json()).items || []);
+      } else {
+        const failure = scansResponse ? await scansResponse.json().catch(() => ({})) : {};
+        nextErrors.scans = failure.detail || "Scan history temporarily unavailable.";
       }
+      setAdminErrors(nextErrors);
       setAdminLastUpdated(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
       setAdminLoading(false);
     };
@@ -2322,6 +2318,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       type="button"
                       key={key}
                       className={isActive ? "active" : ""}
+                      aria-current={isActive ? "page" : undefined}
                       onClick={() => setAdminTab(key as any)}
                     >
                       <b>0{index + 1}</b>
@@ -2334,6 +2331,13 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </aside>
             <MotionPanel panelKey={adminTab} className="admin-command-main">
               {adminMessage && <div className="admin-alert">{adminMessage}</div>}
+              {Object.keys(adminErrors).length > 0 && (
+                <div className="admin-inline-error" role="alert">
+                  <b>Some admin data is unavailable</b>
+                  <span>{Object.entries(adminErrors).map(([area, message]) => `${area}: ${message}`).join(" ")}</span>
+                  <button type="button" className="btn btn-outline" onClick={() => setAdminRefreshKey((value) => value + 1)}>Retry</button>
+                </div>
+              )}
 
           {(adminTab === "operations" || adminTab === "overview") && <>
           <section className="admin-stats-grid">

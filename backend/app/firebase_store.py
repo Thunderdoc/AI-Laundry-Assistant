@@ -12,12 +12,62 @@ import os
 import queue
 import threading
 import uuid
+from urllib import request as urlrequest
+from urllib.error import HTTPError
 from datetime import datetime, timezone
 from typing import Any
 
 
 def _value(name: str) -> str:
     return os.getenv(name, "").strip()
+
+
+def _supabase_configured() -> bool:
+    return bool(_value("SUPABASE_URL") and _value("SUPABASE_SERVICE_ROLE_KEY") and _value("SUPABASE_BUCKET"))
+
+
+def _storage_provider() -> str:
+    return "supabase" if _supabase_configured() else "firebase"
+
+
+def _supabase_request(method: str, path: str, body: bytes | None = None, content_type: str | None = None) -> bytes:
+    base = _value("SUPABASE_URL").rstrip("/")
+    url = f"{base}/storage/v1/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"Bearer {_value('SUPABASE_SERVICE_ROLE_KEY')}",
+        "apikey": _value("SUPABASE_SERVICE_ROLE_KEY"),
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    req = urlrequest.Request(url, data=body, headers=headers, method=method)
+    with urlrequest.urlopen(req, timeout=10) as response:
+        return response.read()
+
+
+def _supabase_upload(path: str, content: bytes) -> None:
+    _supabase_request(
+        "POST",
+        f"object/{_value('SUPABASE_BUCKET')}/{path}",
+        content,
+        "image/jpeg",
+    )
+
+
+def _supabase_download(path: str) -> bytes:
+    return _supabase_request("GET", f"object/{_value('SUPABASE_BUCKET')}/{path}")
+
+
+def _supabase_delete(path: str) -> None:
+    _supabase_request(
+        "POST",
+        f"object/remove/{_value('SUPABASE_BUCKET')}",
+        json.dumps({"prefixes": [path]}).encode("utf-8"),
+        "application/json",
+    )
+
+
+def _supabase_copy(source: str, destination: str) -> None:
+    _supabase_upload(destination, _supabase_download(source))
 
 
 def _credential_present() -> bool:
@@ -203,7 +253,7 @@ def status(probe: bool = False) -> dict[str, Any]:
         "backend": "firebase" if enabled() else "local",
         "configured": configured() if enabled() else True,
         "database": "realtime-database" if enabled() else "sqlite",
-        "image_storage": "firebase-storage" if enabled() else "local-filesystem",
+        "image_storage": f"{_storage_provider()}-storage" if enabled() else "local-filesystem",
         "selection": _value("PERSISTENCE_BACKEND").lower() or "auto",
     }
     if enabled():
@@ -211,6 +261,8 @@ def status(probe: bool = False) -> dict[str, Any]:
         state["credential_valid"] = credential["valid"]
         if credential["error_code"]:
             state["configuration_error"] = credential["error_code"]
+        if _supabase_configured():
+            state["storage_provider"] = "supabase"
     if enabled() and not state["configured"]:
         state["firebase_missing"] = [name for name, present in requirements.items() if not present]
     elif not enabled():
@@ -230,9 +282,13 @@ def status(probe: bool = False) -> dict[str, Any]:
         except Exception as exc:
             db_err = "firebase_timeout" if isinstance(exc, TimeoutError) else type(exc).__name__
 
-        # Firebase Storage probe with candidate bucket fallback
+        # Image storage probe. Supabase is used when configured; Firebase is
+        # retained as the fallback for existing deployments.
         try:
             def probe_storage():
+                if _storage_provider() == "supabase":
+                    _supabase_request("GET", f"bucket/{_value('SUPABASE_BUCKET')}")
+                    return True
                 global _ACTIVE_BUCKET_NAME
                 from firebase_admin import storage
                 for name in _candidate_bucket_names():
@@ -270,8 +326,8 @@ def training_export_reference() -> dict[str, Any]:
     """
     if configured():
         return {
-            "provider": "firebase-storage",
-            "bucket": _ACTIVE_BUCKET_NAME or _clean_bucket_name(_value("FIREBASE_STORAGE_BUCKET")),
+            "provider": _storage_provider() + "-storage",
+            "bucket": _value("SUPABASE_BUCKET") if _storage_provider() == "supabase" else (_ACTIVE_BUCKET_NAME or _clean_bucket_name(_value("FIREBASE_STORAGE_BUCKET"))),
             "prefix": "training-approved/",
             "portable": True,
         }
@@ -285,8 +341,11 @@ def create_prediction(owner_uid: str, record: dict[str, Any], jpeg: bytes) -> di
     storage_path = f"private-uploads/{owner_uid}/{record_id}.jpg"
     blob = None
     try:
-        blob = _bucket().blob(storage_path)
-        blob.upload_from_string(jpeg, content_type="image/jpeg")
+        if _storage_provider() == "supabase":
+            _supabase_upload(storage_path, jpeg)
+        else:
+            blob = _bucket().blob(storage_path)
+            blob.upload_from_string(jpeg, content_type="image/jpeg")
     except Exception:
         storage_path = None
         blob = None
@@ -336,7 +395,10 @@ def delete_prediction(record_id: str, owner_uid: str) -> bool:
     token = row.get("image_token")
     if isinstance(token, str) and token.startswith("private-uploads/"):
         try:
-            _bucket().blob(token).delete()
+            if _storage_provider() == "supabase":
+                _supabase_delete(token)
+            else:
+                _bucket().blob(token).delete()
         except Exception:
             pass
     _root(f"predictions/{record_id}").delete()
@@ -357,8 +419,11 @@ def submit_feedback(
     source_path = str(prediction["image_token"])
     filename = f"user_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{feedback_id[:6]}.jpg"
     pending_path = f"feedback-pending/{confirmed_fabric}/{filename}"
-    bucket = _bucket()
-    bucket.copy_blob(bucket.blob(source_path), bucket, pending_path)
+    if _storage_provider() == "supabase":
+        _supabase_copy(source_path, pending_path)
+    else:
+        bucket = _bucket()
+        bucket.copy_blob(bucket.blob(source_path), bucket, pending_path)
     feedback = {
         "id": feedback_id,
         "prediction_id": str(prediction["id"]),
@@ -386,7 +451,10 @@ def submit_feedback(
         })
     except Exception:
         try:
-            bucket.blob(pending_path).delete()
+            if _storage_provider() == "supabase":
+                _supabase_delete(pending_path)
+            else:
+                bucket.blob(pending_path).delete()
         except Exception:
             pass
         raise
@@ -405,19 +473,22 @@ def feedback_image(feedback_id: str) -> bytes | None:
     item = _root(f"feedback/{feedback_id}").get()
     if not isinstance(item, dict) or not item.get("storage_path"):
         return None
-    return _bucket().blob(item["storage_path"]).download_as_bytes()
+    return _supabase_download(item["storage_path"]) if _storage_provider() == "supabase" else _bucket().blob(item["storage_path"]).download_as_bytes()
 
 
 def review_feedback(feedback_id: str, reviewer_uid: str, approved: bool) -> dict[str, Any] | None:
     item = _root(f"feedback/{feedback_id}").get()
     if not isinstance(item, dict) or item.get("review_status") != "pending":
         return None
-    bucket = _bucket()
-    source = bucket.blob(item["storage_path"])
+    bucket = None if _storage_provider() == "supabase" else _bucket()
+    source = None if bucket is None else bucket.blob(item["storage_path"])
     approved_blob = None
     if approved:
         approved_path = f"training-approved/{item['confirmed_fabric']}/{item['filename']}"
-        approved_blob = bucket.copy_blob(source, bucket, approved_path)
+        if _storage_provider() == "supabase":
+            _supabase_copy(item["storage_path"], approved_path)
+        else:
+            approved_blob = bucket.copy_blob(source, bucket, approved_path)
         item["approved_storage_path"] = approved_path
     item.update({
         "review_status": "approved" if approved else "rejected",
@@ -451,7 +522,10 @@ def review_feedback(feedback_id: str, reviewer_uid: str, approved: bool) -> dict
                 pass
         raise
     try:
-        source.delete()
+        if _storage_provider() == "supabase":
+            _supabase_delete(item["storage_path"])
+        else:
+            source.delete()
     except Exception:
         pass
     return item
