@@ -16,8 +16,8 @@ export function Reveal({ children, className, delay = 0, as = "div", ...rest }: 
     <Component
       className={className}
       {...rest}
-      initial={reduceMotion ? false : { opacity: 0, y: 18, filter: "blur(7px)" }}
-      whileInView={reduceMotion ? undefined : { opacity: 1, y: 0, filter: "blur(0px)" }}
+      initial={reduceMotion ? false : { opacity: 0, y: 18 }}
+      whileInView={reduceMotion ? undefined : { opacity: 1, y: 0 }}
       viewport={{ once: true, margin: "-40px" }}
       transition={{ duration: 0.55, delay, ease: [0.22, 1, 0.36, 1] }}
     >
@@ -33,7 +33,7 @@ export function TextEffect({ children, className }: { children: string; classNam
   return (
     <motion.span className={className} initial="hidden" animate="visible" variants={{ visible: { transition: { staggerChildren: 0.055 } } }}>
       {words.map((word, index) => (
-        <motion.span className="motion-word" key={`${word}-${index}`} variants={{ hidden: { opacity: 0, y: 22, filter: "blur(8px)" }, visible: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.52, ease: [0.22, 1, 0.36, 1] } } }}>
+        <motion.span className="motion-word" key={`${word}-${index}`} variants={{ hidden: { opacity: 0, y: 22 }, visible: { opacity: 1, y: 0, transition: { duration: 0.52, ease: [0.22, 1, 0.36, 1] } } }}>
           {word}{index < words.length - 1 ? "\u00a0" : ""}
         </motion.span>
       ))}
@@ -61,3 +61,19 @@ export function MotionPanel({ panelKey, children, className }: { panelKey: strin
 
 export const MotionButton = motion.button;
 export const MotionDiv = motion.div;
+export const MotionMain = motion.main;
+export const MotionSection = motion.section;
+
+export function MotionPage({ children, className }: { children: ReactNode; className?: string }) {
+  const reduceMotion = useReducedMotion();
+  return (
+    <motion.main
+      className={className}
+      initial={reduceMotion ? false : { opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: .32, ease: "easeOut" }}
+    >
+      {children}
+    </motion.main>
+  );
+}

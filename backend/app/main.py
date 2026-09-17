@@ -166,6 +166,7 @@ def connection():
     db.row_factory = sqlite3.Row
     try:
         db.execute("CREATE TABLE IF NOT EXISTS predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_uid TEXT NOT NULL DEFAULT 'local-preview', created_at TEXT NOT NULL, fabric TEXT NOT NULL, confidence REAL NOT NULL, payload TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, admin_uid TEXT NOT NULL, target_uid TEXT, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)")
         columns={row[1] for row in db.execute("PRAGMA table_info(predictions)")}
         if "owner_uid" not in columns:
             db.execute("ALTER TABLE predictions ADD COLUMN owner_uid TEXT NOT NULL DEFAULT 'local-preview'")
@@ -173,6 +174,44 @@ def connection():
         db.commit()
     finally:
         db.close()
+
+def record_audit(action: str, admin_uid: str, target_uid: str | None = None, metadata: dict | None = None) -> None:
+    event = {
+        "action": action,
+        "admin_uid": str(admin_uid),
+        "target_uid": str(target_uid) if target_uid else None,
+        "metadata": metadata or {},
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    if firebase_store.enabled():
+        try:
+            firebase_store.create_audit_event(event)
+        except Exception as exc:
+            raise HTTPException(503, "Could not write the administrator audit record.") from exc
+        return
+    with connection() as db:
+        db.execute(
+            "INSERT INTO audit_events (action,admin_uid,target_uid,metadata,created_at) VALUES (?,?,?,?,?)",
+            (event["action"], event["admin_uid"], event["target_uid"], json.dumps(event["metadata"]), event["created_at"]),
+        )
+
+def audit_events(limit: int = 100, offset: int = 0) -> list[dict]:
+    if firebase_store.enabled():
+        try:
+            return firebase_store.list_audit_events(limit=limit, offset=offset)
+        except Exception as exc:
+            raise HTTPException(503, "Cloud audit history is temporarily unavailable.") from exc
+    with connection() as db:
+        rows = db.execute(
+            "SELECT action,admin_uid,target_uid,metadata,created_at FROM audit_events ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item["metadata"] or "{}")
+            result.append(item)
+        return result
 
 def request_uid(request: Request) -> str:
     user = getattr(request.state, "user", None)
@@ -723,6 +762,7 @@ def update_admin_role(uid: str, payload: AdminRoleUpdate, request: Request):
         if payload.is_admin: claims["admin"]=True
         else: claims.pop("admin",None)
         auth_client.set_custom_user_claims(uid,claims or None)
+        record_audit("admin_role_updated", str(admin.get("uid")), uid, {"is_admin": payload.is_admin})
         return {"updated":True,"uid":uid,"is_admin":payload.is_admin,"message":"The user must refresh their sign-in token."}
     except HTTPException:
         raise
@@ -738,46 +778,146 @@ def update_user_status(uid: str, payload: UserStatusUpdate, request: Request):
         auth_client=firebase_admin_auth_client()
         auth_client.update_user(uid,disabled=payload.disabled)
         if payload.disabled: auth_client.revoke_refresh_tokens(uid)
+        record_audit("user_status_updated", str(admin.get("uid")), uid, {"disabled": payload.disabled})
         return {"updated":True,"uid":uid,"disabled":payload.disabled}
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(503,"Could not update the user status.") from exc
 
+def _paginate(items: list[dict], page: int, page_size: int) -> dict:
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"count": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "items": items[start:start + page_size]}
+
 @app.get("/api/admin/scans")
-def admin_scans(request: Request, limit: int = 100):
+def admin_scans(
+    request: Request,
+    page: int = 1,
+    page_size: int = 100,
+    fabric: str | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    limit: int | None = None,
+):
     require_admin(request)
-    limit = max(1, min(limit, 500))
+    page = max(1, page)
+    if limit is not None:
+        page_size = limit
+    page_size = max(1, min(page_size, 500))
     try:
         scans = saved_history()
-        return {"count": len(scans), "items": scans[:limit]}
+        if fabric:
+            scans = [item for item in scans if item.get("fabric") == fabric.strip().lower()]
+        if min_confidence is not None:
+            scans = [item for item in scans if float(item.get("confidence", 0)) >= min_confidence]
+        if max_confidence is not None:
+            scans = [item for item in scans if float(item.get("confidence", 0)) <= max_confidence]
+        if from_date:
+            scans = [item for item in scans if str(item.get("created_at", "")) >= from_date]
+        if to_date:
+            scans = [item for item in scans if str(item.get("created_at", "")) <= to_date]
+        return _paginate(scans, page, page_size)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(503, "Cloud scan history is temporarily unavailable.") from exc
 
-@app.get("/api/admin/feedback")
-def admin_feedback(request: Request):
+@app.get("/api/admin/analytics")
+def admin_analytics(request: Request, days: int = 30):
     require_admin(request)
+    days = max(1, min(days, 366))
+    try:
+        scans = saved_history()
+    except HTTPException:
+        raise
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - days * 86400
+    recent = []
+    for item in scans:
+        try:
+            stamp = datetime.fromisoformat(str(item.get("created_at", "")).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            continue
+        if stamp >= cutoff:
+            recent.append(item)
+    distribution = {name: 0 for name in [*labels(), NON_FABRIC, "unknown"]}
+    confidence_buckets = {"0-49": 0, "50-74": 0, "75-89": 0, "90-100": 0}
+    trends = {}
+    for item in recent:
+        fabric_name = item.get("fabric")
+        if fabric_name in distribution:
+            distribution[fabric_name] += 1
+        confidence = float(item.get("confidence", 0))
+        bucket = "0-49" if confidence < 50 else "50-74" if confidence < 75 else "75-89" if confidence < 90 else "90-100"
+        confidence_buckets[bucket] += 1
+        day = str(item.get("created_at", ""))[:10]
+        if day:
+            trends[day] = trends.get(day, 0) + 1
+    return {
+        "days": days,
+        "scan_count": len(recent),
+        "fabric_distribution": distribution,
+        "confidence": {
+            "average": round(sum(float(item.get("confidence", 0)) for item in recent) / len(recent), 2) if recent else None,
+            "buckets": confidence_buckets,
+        },
+        "daily_trend": [{"date": day, "count": trends[day]} for day in sorted(trends)],
+    }
+
+@app.get("/api/admin/audit-log")
+def admin_audit_log(request: Request, page: int = 1, page_size: int = 100):
+    require_admin(request)
+    page = max(1, page)
+    page_size = max(1, min(page_size, 500))
+    offset = (page - 1) * page_size
+    items = audit_events(page_size, offset)
     if firebase_store.enabled():
         try:
-            items=firebase_store.list_feedback("pending")
+            total = firebase_store.count_audit_events()
+        except Exception as exc:
+            raise HTTPException(503, "Cloud audit history is temporarily unavailable.") from exc
+    else:
+        with connection() as db:
+            total = db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+    return {"count": total, "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size, "items": items}
+
+@app.get("/api/admin/feedback")
+def admin_feedback(request: Request, page: int = 1, page_size: int = 100, status: str = "pending", fabric: str | None = None):
+    require_admin(request)
+    page = max(1, page)
+    page_size = max(1, min(page_size, 500))
+    if status not in {"pending", "approved", "rejected", "all"}:
+        raise HTTPException(422, "Invalid feedback status.")
+    if firebase_store.enabled():
+        try:
+            items=firebase_store.list_feedback("" if status == "all" else status)
         except Exception as exc:
             raise HTTPException(503, "Cloud feedback queue is temporarily unavailable.") from exc
-        return {"count":len(items),"items":[{
+        if fabric:
+            items = [item for item in items if item.get("confirmed_fabric") == fabric.strip().lower()]
+        shaped=[{
             "id":item["id"], "fabric":item["confirmed_fabric"],
             "file":item["id"], "filename":item.get("filename"),
             "original_fabric":item.get("original_fabric"),
             "created_at":item.get("created_at"),
             "image_url":f"/api/admin/feedback/{item['confirmed_fabric']}/{item['id']}/image",
-        } for item in items]}
+            "review_status": item.get("review_status"),
+        } for item in items]
+        return _paginate(shaped, page, page_size)
     pending=[]
     base=os.path.join(DATA_DIR,"review_pending")
     for fabric_name in [*FABRICS.keys(), NON_FABRIC]:
         folder=os.path.join(base,fabric_name)
         if os.path.isdir(folder):
             pending.extend({"fabric":fabric_name,"file":name} for name in sorted(os.listdir(folder)) if name.lower().endswith((".jpg",".jpeg",".png",".webp")))
-    return {"count":len(pending),"items":pending}
+    if status != "pending":
+        pending = []
+    if fabric:
+        pending = [item for item in pending if item.get("fabric") == fabric.strip().lower()]
+    return _paginate(pending, page, page_size)
 
 @app.get("/api/admin/feedback/{fabric_name}/{filename}/image")
 def admin_feedback_image(fabric_name: str, filename: str, request: Request):
@@ -805,6 +945,7 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
         except Exception as exc:
             raise HTTPException(503, "Could not approve this feedback item.") from exc
         if not item: raise HTTPException(404,"Pending feedback image not found.")
+        record_audit("feedback_approved", str(admin.get("uid")), item.get("owner_uid"), {"feedback_id": item.get("id"), "fabric": item.get("confirmed_fabric")})
         return {"approved":True,"fabric":item["confirmed_fabric"],"file":item["filename"]}
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,safe_name)
     if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
@@ -812,6 +953,7 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
     os.makedirs(target_dir,exist_ok=True)
     target=os.path.join(target_dir,safe_name)
     shutil.move(source,target)
+    record_audit("feedback_approved", str(admin.get("uid")), None, {"file": safe_name, "fabric": fabric_name})
     return {"approved":True,"fabric":fabric_name,"file":safe_name}
 
 @app.delete("/api/admin/feedback/{fabric_name}/{filename}")
@@ -824,10 +966,12 @@ def reject_feedback(fabric_name: str, filename: str, request: Request):
         except Exception as exc:
             raise HTTPException(503, "Could not reject this feedback item.") from exc
         if not item: raise HTTPException(404,"Pending feedback image not found.")
+        record_audit("feedback_rejected", str(admin.get("uid")), item.get("owner_uid"), {"feedback_id": item.get("id"), "fabric": item.get("confirmed_fabric")})
         return {"rejected":True}
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))
     if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
     os.remove(source)
+    record_audit("feedback_rejected", str(admin.get("uid")), None, {"file": os.path.basename(filename), "fabric": fabric_name})
     return {"rejected":True}
 
 @app.get("/api/model/info")

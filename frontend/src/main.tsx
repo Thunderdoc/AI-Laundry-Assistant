@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { useReducedMotion } from "motion/react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
-import { MotionButton, MotionDiv, MotionPanel, Reveal, TextEffect } from "./motion-primitives";
+import { MotionButton, MotionDiv, MotionPage, MotionPanel, MotionSection, Reveal, TextEffect } from "./motion-primitives";
 import "./style.css";
 
 // Vercel and Render are separate deployments. Keep the known production API
@@ -361,6 +362,20 @@ type AdminUser = {
   last_sign_in_at?: number;
 };
 
+type AdminAuditEntry = {
+  id?: string;
+  action?: string;
+  actor?: string;
+  created_at?: string | number;
+  detail?: string;
+};
+
+type AdminHealth = {
+  status?: string;
+  model_ready?: boolean;
+  [key: string]: unknown;
+};
+
 function AdminFeedbackPreview({ item }: { item: AdminFeedbackItem }) {
   const [source, setSource] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -680,6 +695,7 @@ function ConfusionMatrixView({ metrics }: { metrics: any }) {
 }
 
 function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise<void> }) {
+  const reduceMotion = useReducedMotion();
   const [page, setPage] = useState<Page>("home");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [file, setFile] = useState<File | undefined>();
@@ -699,8 +715,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [adminScans, setAdminScans] = useState<any[]>([]);
   const [reviewSubtab, setReviewSubtab] = useState<"pending" | "scans">("pending");
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [adminAudit, setAdminAudit] = useState<AdminAuditEntry[]>([]);
+  const [adminHealth, setAdminHealth] = useState<AdminHealth | null>(null);
   const [adminMessage, setAdminMessage] = useState("");
   const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
+  const [adminPanelLoading, setAdminPanelLoading] = useState<Record<string, boolean>>({});
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewFilter, setReviewFilter] = useState<"all" | "corrected" | "confirmed">("all");
+  const [userQuery, setUserQuery] = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminTab, setAdminTab] = useState<"operations" | "overview" | "review" | "feedback" | "users" | "model" | "reference">("operations");
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
@@ -758,14 +780,18 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     const refreshAdminOverview = async () => {
       setAdminLoading(true);
       setAdminMessage("");
-      await fetch(`${API}/health`, { cache: "no-store" }).catch(() => undefined);
-      const [overviewResponse, feedbackResponse, usersResponse, scansResponse] = await Promise.all([
+      setAdminPanelLoading({ overview: true, feedback: true, scans: true, users: true, audit: true, health: true });
+      const [healthResponse, overviewResponse, feedbackResponse, usersResponse, scansResponse, auditResponse] = await Promise.all([
+        fetch(`${API}/health`, { cache: "no-store" }).catch(() => null),
         apiFetch(`${API}/admin/overview`).catch(() => null),
         apiFetch(`${API}/admin/feedback`).catch(() => null),
         apiFetch(`${API}/admin/users`).catch(() => null),
         apiFetch(`${API}/admin/scans`).catch(() => null),
+        apiFetch(`${API}/admin/audit`).catch(() => null),
       ]);
       const nextErrors: Record<string, string> = {};
+      if (healthResponse?.ok) setAdminHealth(await healthResponse.json());
+      else nextErrors.health = "Health endpoint unavailable.";
       if (overviewResponse && overviewResponse.ok) {
         const overview = await overviewResponse.json();
         setAdminOverview(overview);
@@ -792,12 +818,20 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         const failure = scansResponse ? await scansResponse.json().catch(() => ({})) : {};
         nextErrors.scans = failure.detail || "Scan history temporarily unavailable.";
       }
+      if (auditResponse && auditResponse.ok) {
+        const audit = await auditResponse.json();
+        setAdminAudit(audit.items || audit.events || []);
+      } else if (auditResponse?.status !== 404) {
+        nextErrors.audit = "Audit history temporarily unavailable.";
+      }
       setAdminErrors(nextErrors);
+      setAdminPanelLoading({});
       setAdminLastUpdated(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
       setAdminLoading(false);
     };
     void refreshAdminOverview().catch(() => {
       setAdminLoading(false);
+      setAdminPanelLoading({});
     });
     // Conditional loop: it polls only while the model-training job is active.
     if (adminOverview?.retraining?.status === "running") {
@@ -1139,6 +1173,28 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     </button>
   );
 
+  const normalizedReviewQuery = reviewQuery.trim().toLowerCase();
+  const filteredFeedback = adminFeedback.filter((item) =>
+    !normalizedReviewQuery || [item.fabric, item.original_fabric, item.filename, item.file].some((value) => String(value || "").toLowerCase().includes(normalizedReviewQuery))
+  );
+  const filteredScans = adminScans.filter((scan) => {
+    const matchesQuery = !normalizedReviewQuery || [scan.fabric, scan.note, scan.owner_uid, scan.id].some((value) => String(value || "").toLowerCase().includes(normalizedReviewQuery));
+    const corrected = Boolean(scan.user_feedback && !scan.user_feedback.was_correct);
+    const confirmed = Boolean(scan.user_feedback?.was_correct);
+    return matchesQuery && (reviewFilter === "all" || (reviewFilter === "corrected" && corrected) || (reviewFilter === "confirmed" && confirmed));
+  });
+  const filteredUsers = adminUsers.filter((account) =>
+    !userQuery.trim() || [account.name, account.email, account.uid].some((value) => String(value || "").toLowerCase().includes(userQuery.trim().toLowerCase()))
+  );
+  const trendDays = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() - (6 - index));
+    const key = date.toISOString().slice(0, 10);
+    return { key, label: date.toLocaleDateString([], { weekday: "short" }), count: adminScans.filter((scan) => String(scan.created_at || "").slice(0, 10) === key).length };
+  });
+  const trendMax = Math.max(1, ...trendDays.map((day) => day.count));
+
   return (
     <>
       {/* Top Navigation Bar */}
@@ -1176,7 +1232,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           HOME PAGE
           ======================================================== */}
       {page === "home" && (
-        <main className="page-container">
+        <MotionPage className="page-container">
           {/* Hero Section */}
           <section className="hero-grid">
             <Reveal className="hero-left">
@@ -1353,14 +1409,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               </div>
             </div>
           </section>
-        </main>
+        </MotionPage>
       )}
 
       {/* ========================================================
           ANALYZE PAGE (3-STAGE WORKSPACE WITH ACTIVE LEARNING)
           ======================================================== */}
       {page === "analyze" && (
-        <main className="page-container">
+        <MotionPage className="page-container">
           <Reveal className="analyze-workspace">
             {/* Stepper Header */}
             <div className="workspace-stepper">
@@ -1444,7 +1500,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       🔄 Switch Camera
                     </button>
                   </div>
-                </div>
+                </MotionDiv>
               )}
 
               {/* Drop Zone — hidden while camera is open */}
@@ -1615,7 +1671,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
               {/* Multi-step Processing Animation */}
               {isAnalyzing && (
-                <div className="processing-screen">
+                <MotionDiv className="processing-screen" initial={reduceMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .25, ease: "easeOut" }}>
                   <div className="processing-spinner"></div>
                   <h3 style={{ fontSize: "20px", marginBottom: "8px" }}>AI Vision Engine at Work</h3>
                   <p style={{ color: "var(--text-muted)", fontSize: "14px" }}>{status}</p>
@@ -1646,7 +1702,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
             {/* STAGE 3: Comprehensive Result & Care Profile + Active Learning Loop */}
             {result && (
-              <section style={{ marginTop: "32px" }}>
+              <MotionSection style={{ marginTop: "32px" }} initial={reduceMotion ? false : { opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .35, ease: "easeOut" }}>
                 <div className="result-header-card">
                   <span className="eyebrow">AI FABRIC ANALYSIS REPORT</span>
                   <div className="result-main-badge">
@@ -1677,7 +1733,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   {/* Confidence Bar */}
                   <div className="confidence-meter-container">
                     <div className="confidence-bar-bg">
-                      <div className="confidence-bar-fill" style={{ width: `${Math.min(100, Math.max(5, result.confidence))}%` }}></div>
+                      <div className="confidence-bar-fill" style={{ transform: `scaleX(${Math.min(100, Math.max(5, result.confidence)) / 100})` }}></div>
                     </div>
                   </div>
 
@@ -2031,17 +2087,17 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   )}
 
                 </div>
-              </section>
+              </MotionSection>
             )}
           </Reveal>
-        </main>
+        </MotionPage>
       )}
 
       {/* ========================================================
           INSIGHTS PAGE (ANALYTICS & DATASET STATS)
           ======================================================== */}
       {page === "insights" && (
-        <main className="page-container">
+        <MotionPage className="page-container">
           <Reveal>
           <span className="eyebrow">MODEL METRICS & USAGE</span>
           <h1><TextEffect>Model performance, made clear.</TextEffect></h1>
@@ -2154,14 +2210,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </div>
           )}
           </Reveal>
-        </main>
+        </MotionPage>
       )}
 
       {/* ========================================================
           FABRIC LIBRARY & COMPARISON
           ======================================================== */}
       {page === "library" && (
-        <main className="page-container">
+        <MotionPage className="page-container">
           <Reveal>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
             <div>
@@ -2286,7 +2342,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </div>
           )}
           </Reveal>
-        </main>
+        </MotionPage>
       )}
 
       {page === "admin" && user.is_admin && (
@@ -2304,7 +2360,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           <div className="admin-console-shell">
             <aside className="admin-command-rail">
               <div className="admin-rail-heading"><span>Workspace</span><small>Choose an operational area</small></div>
-              <nav className="admin-tabs" aria-label="Admin operations">
+              <nav className="admin-tabs" aria-label="Admin operations" role="tablist">
                 {[
                   ['operations', 'Operations', 'Service health & dataset stats', '⚡'],
                   ['review', `Review · ${adminFeedback.length}`, 'Approve corrections & scan logs', '👁️'],
@@ -2318,7 +2374,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       type="button"
                       key={key}
                       className={isActive ? "active" : ""}
-                      aria-current={isActive ? "page" : undefined}
+                      role="tab"
+                      aria-selected={isActive}
+                      tabIndex={isActive ? 0 : -1}
                       onClick={() => setAdminTab(key as any)}
                     >
                       <b>0{index + 1}</b>
@@ -2329,7 +2387,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               </nav>
               <div className="admin-rail-footer"><span className={adminOverview?.model_ready ? "online" : "pending"} /><div><b>Inference API</b><small>{adminOverview?.model_ready ? "Operational" : "Checking connection"}</small></div></div>
             </aside>
-            <MotionPanel panelKey={adminTab} className="admin-command-main">
+            <MotionPanel panelKey={`${adminTab}-${adminRefreshKey}`} className={`admin-command-main ${adminLoading ? "is-refreshing" : ""}`}>
               {adminMessage && <div className="admin-alert">{adminMessage}</div>}
               {Object.keys(adminErrors).length > 0 && (
                 <div className="admin-inline-error" role="alert">
@@ -2341,23 +2399,30 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
           {(adminTab === "operations" || adminTab === "overview") && <>
           <section className="admin-stats-grid">
-            <div><span>Total scans</span><b>{adminOverview?.total_scans ?? history.length}</b><small>Recorded analyses</small></div>
-            <div><span>Active users</span><b>{adminUsers.length || "—"}</b><small>Firebase accounts</small></div>
-            <div><span>Pending reviews</span><b>{adminFeedback.length}</b><small>Corrections awaiting approval</small></div>
-            <div><span>Dataset samples</span><b>{adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b><small>Across supported classes</small></div>
-            <div><span>Model status</span><b>{adminOverview?.model_ready ? "Ready" : "Checking"}</b><small>Live inference availability</small></div>
+            <div><span>Total scans</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.total_scans ?? "—"}</b><small>Recorded analyses</small></div>
+            <div><span>Active users</span><b>{adminPanelLoading.users ? "…" : adminUsers.length || "—"}</b><small>Firebase accounts</small></div>
+            <div><span>Pending reviews</span><b>{adminPanelLoading.feedback ? "…" : adminFeedback.length}</b><small>Corrections awaiting approval</small></div>
+            <div><span>Dataset samples</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b><small>Across supported classes</small></div>
+            <div><span>Model status</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.model_ready == null ? "—" : adminOverview.model_ready ? "Ready" : "Blocked"}</b><small>Live inference availability</small></div>
+            <div><span>Audit events</span><b>{adminPanelLoading.audit ? "…" : adminAudit.length || "—"}</b><small>Recorded admin actions</small></div>
+          </section>
+          <section className="admin-trend-panel">
+            <div className="admin-section-heading"><div><span className="eyebrow">ACTIVITY TREND</span><h2>Scans this week</h2></div><span className="admin-count">{adminScans.length ? "Last 7 days" : "No scan data"}</span></div>
+            {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan activity…</p> : adminScans.length ? <div className="admin-trend" aria-label="Seven day scan activity">
+              {trendDays.map((day) => <div className="admin-trend-day" key={day.key}><strong>{day.count}</strong><div className="admin-trend-bar"><i style={{ height: `${Math.max(8, day.count / trendMax * 100)}%` }} /></div><small>{day.label}</small></div>)}
+            </div> : <p className="admin-empty">Scan activity will appear after the API records scans.</p>}
           </section>
 
           <section className="admin-health-panel">
             <div className="admin-section-heading">
               <div><span className="eyebrow">SYSTEM READINESS</span><h2>Production health</h2></div>
-              <strong className="readiness-score">{[
+              <strong className="readiness-score">{adminPanelLoading.health ? "…" : adminHealth ? [
                 adminOverview?.model_ready,
                 adminOverview?.auth?.firebase_project,
                 adminOverview?.auth?.admin_allowlist,
                 adminOverview?.persistence?.backend === "firebase",
                 adminOverview?.persistence?.reachable === true,
-              ].filter(Boolean).length * 20}%</strong>
+              ].filter(Boolean).length * 20 : "—"}{adminHealth && "%"}</strong>
             </div>
             <div className="admin-service-grid">
               {[
@@ -2368,6 +2433,13 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 ["Cloud connection", adminOverview?.persistence?.reachable === true, adminOverview?.persistence?.reachable === false ? `Blocked: ${adminOverview?.persistence?.error || "configuration"}` : "Database and Storage reachable"],
               ].map(([label,ok,detail]) => <div className={`admin-service ${ok ? "healthy" : "blocked"}`} key={String(label)}><span>{ok ? "✓" : "!"}</span><div><b>{String(label)}</b><small>{String(detail)}</small></div></div>)}
             </div>
+          </section>
+
+          <section className="admin-audit-panel">
+            <div className="admin-section-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h2>Recent administrative activity</h2></div><span className="admin-count">{adminAudit.length ? `${adminAudit.length} events` : "No events"}</span></div>
+            {adminPanelLoading.audit ? <p className="admin-panel-loading" role="status">Loading audit history…</p> : adminAudit.length ? <div className="admin-audit-list">
+              {adminAudit.slice(0, 8).map((entry, index) => <div className="admin-audit-row" key={entry.id || `${entry.action}-${index}`}><span className="admin-audit-icon">↳</span><div><strong>{entry.action || "Administrative event"}</strong><small>{entry.detail || entry.actor || "Recorded by the platform"}{entry.created_at ? ` · ${new Date(entry.created_at).toLocaleString()}` : ""}</small></div></div>)}
+            </div> : adminErrors.audit ? <p className="admin-panel-error" role="status">{adminErrors.audit}</p> : <p className="admin-empty">No audit endpoint data is available yet.</p>}
           </section>
 
           <section className="admin-review-queue">
@@ -2403,8 +2475,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   setAdminMessage(error instanceof Error ? error.message : "Could not start retraining.");
                 }
               }}>{adminOverview?.training_mode === "external_gpu" ? "Dispatch GPU training" : "Start reviewed training"}</button> : <div className="training-disabled"><b>Training is in review-only mode</b><span>Predictions and approved feedback continue to work. Train approved batches on the local RTX GPU, then use the release gate before deploying a candidate.</span></div>}
-              {adminOverview?.retraining?.status === "running" && <p className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</p>}
-              {adminOverview?.retraining?.status === "completed" && <p className="admin-live-status"><span className="live-dot" /> Candidate ready. Review its metrics before promotion.</p>}
+              {adminOverview?.retraining?.status === "running" && <MotionPanel panelKey="training-running" className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</MotionPanel>}
+              {adminOverview?.retraining?.status === "completed" && <MotionPanel panelKey="training-completed" className="admin-live-status"><span className="live-dot" /> Candidate ready. Review its metrics before promotion.</MotionPanel>}
             </div>
             <div className="admin-checklist">
               <h3>Before deployment</h3>
@@ -2443,10 +2515,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   </button>
                 </div>
               </div>
+              <div className="admin-toolbar">
+                <label className="admin-search"><span className="sr-only">Search review records</span><input value={reviewQuery} onChange={(event) => setReviewQuery(event.target.value)} placeholder={reviewSubtab === "pending" ? "Search fabric or filename" : "Search fabric, note, or user ID"} type="search" /></label>
+                {reviewSubtab === "scans" && <label className="admin-filter"><span className="sr-only">Filter scan feedback</span><select value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value as typeof reviewFilter)}><option value="all">All scan statuses</option><option value="confirmed">User confirmed</option><option value="corrected">User corrected</option></select></label>}
+              </div>
 
               {reviewSubtab === "pending" && (
                 <>
-                  {adminFeedback.length ? adminFeedback.map((item) => (
+                  {adminPanelLoading.feedback ? <p className="admin-panel-loading" role="status">Loading feedback queue…</p> : filteredFeedback.length ? filteredFeedback.map((item) => (
                     <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
                       <AdminFeedbackPreview item={item} />
                       <div className="admin-review-copy">
@@ -2468,13 +2544,13 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                         }}>Reject</button>
                       </div>
                     </article>
-                  )) : <p className="admin-empty">No feedback is waiting for review. New user corrections will appear here for approval.</p>}
+                  )) : <p className="admin-empty">{adminFeedback.length ? "No feedback matches this search." : "No feedback is waiting for review. New user corrections will appear here for approval."}</p>}
                 </>
               )}
 
               {reviewSubtab === "scans" && (
                 <div className="admin-scans-list" style={{ display: "grid", gap: "10px", marginTop: "14px" }}>
-                  {adminScans.length ? adminScans.map((scan: any) => (
+                  {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan history…</p> : filteredScans.length ? filteredScans.map((scan: any) => (
                     <article className="admin-review-row admin-scan-card" key={String(scan.id)}>
                       <div className="admin-user-avatar" style={{ fontSize: "20px", background: "rgba(67,214,162,0.12)", color: "#43d6a2" }}>
                         🧺
@@ -2497,7 +2573,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                         <small style={{ color: "#78968a" }}>{scan.created_at ? new Date(scan.created_at).toLocaleString() : "Date recorded"} • User UID: {String(scan.owner_uid || scan.id || "").slice(0, 10)}</small>
                       </div>
                     </article>
-                  )) : <p className="admin-empty">No scan records recorded yet.</p>}
+                  )) : <p className="admin-empty">{adminScans.length ? "No scans match this search or filter." : "No scan records recorded yet."}</p>}
                 </div>
               )}
             </section>
@@ -2510,7 +2586,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               <span className="admin-count">{adminUsers.length} users</span>
             </div>
             <p className="admin-section-copy">Grant only trusted accounts administrator access. Role changes take effect after the user signs out and signs in again.</p>
-            {adminUsers.length ? adminUsers.map((account) => (
+            <label className="admin-search"><span className="sr-only">Search users</span><input value={userQuery} onChange={(event) => setUserQuery(event.target.value)} placeholder="Search name, email, or user ID" type="search" /></label>
+            {adminPanelLoading.users ? <p className="admin-panel-loading" role="status">Loading user directory…</p> : filteredUsers.length ? filteredUsers.map((account) => (
               <article className="admin-user-row" key={account.uid}>
                 <div className="admin-user-avatar">{account.picture ? <img src={account.picture} alt="" referrerPolicy="no-referrer" /> : (account.email || "?").charAt(0).toUpperCase()}</div>
                 <div className="admin-review-copy">
@@ -2538,7 +2615,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   }}>{account.disabled ? "Enable user" : "Disable user"}</button>
                 </div>
               </article>
-            )) : <p className="admin-empty">No Firebase users could be loaded.</p>}
+            )) : <p className="admin-empty">{adminUsers.length ? "No users match this search." : adminErrors.users || "No Firebase users could be loaded."}</p>}
           </section>}
 
           {adminTab === "reference" && <section className="admin-reference">
@@ -2560,7 +2637,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           ABOUT PAGE
           ======================================================== */}
       {page === "about" && (
-        <main className="page-container">
+        <MotionPage className="page-container">
           <Reveal>
           <div style={{ maxWidth: "840px", margin: "0 auto" }}>
             <span className="eyebrow">ABOUT THE PLATFORM</span>
@@ -2603,7 +2680,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </div>
           </div>
           </Reveal>
-        </main>
+        </MotionPage>
       )}
 
       {/* Multi-Column Professional Footer */}

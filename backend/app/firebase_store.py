@@ -531,6 +531,31 @@ def review_feedback(feedback_id: str, reviewer_uid: str, approved: bool) -> dict
     return item
 
 
+def create_audit_event(event: dict[str, Any]) -> str:
+    """Store a minimal, non-secret administrator audit event."""
+    event_id = uuid.uuid4().hex
+    _root(f"auditEvents/{event_id}").set({
+        "action": str(event["action"]),
+        "admin_uid": str(event["admin_uid"]),
+        "target_uid": str(event["target_uid"]) if event.get("target_uid") else None,
+        "metadata": event.get("metadata") or {},
+        "created_at": event["created_at"],
+    })
+    return event_id
+
+
+def list_audit_events(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    values = _root("auditEvents").get() or {}
+    rows = list(values.values()) if isinstance(values, dict) else []
+    rows.sort(key=lambda row: row.get("created_at", ""), reverse=True)
+    return rows[offset:offset + limit]
+
+
+def count_audit_events() -> int:
+    values = _root("auditEvents").get() or {}
+    return len(values) if isinstance(values, dict) else 0
+
+
 def approved_counts() -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in list_feedback("approved"):

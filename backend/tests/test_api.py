@@ -444,5 +444,38 @@ class TestLaundryAIAPI(unittest.TestCase):
             self.assertEqual(data["count"], 1)
             self.assertEqual(data["items"][0]["fabric"], "cotton")
 
+    def test_22_admin_scan_filters_and_pagination(self):
+        from app import main
+        scans = [
+            {"id": 1, "fabric": "cotton", "confidence": 92, "created_at": "2026-09-17T10:00:00Z"},
+            {"id": 2, "fabric": "silk", "confidence": 61, "created_at": "2026-09-16T10:00:00Z"},
+            {"id": 3, "fabric": "cotton", "confidence": 88, "created_at": "2026-09-15T10:00:00Z"},
+        ]
+        with patch.object(main, "require_admin", return_value={"uid": "admin-1"}), patch.object(main, "saved_history", return_value=scans):
+            res = self.client.get("/api/admin/scans?page=1&page_size=1&fabric=cotton&min_confidence=90")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["count"], 1)
+        self.assertEqual(res.json()["items"][0]["id"], 1)
+
+    def test_23_admin_analytics_and_audit_log(self):
+        from app import main
+        scans = [
+            {"fabric": "cotton", "confidence": 92, "created_at": "2026-09-17T10:00:00Z"},
+            {"fabric": "silk", "confidence": 61, "created_at": "2026-09-16T10:00:00Z"},
+        ]
+        with patch.object(main, "require_admin", return_value={"uid": "admin-1"}), patch.object(main, "saved_history", return_value=scans):
+            analytics = self.client.get("/api/admin/analytics?days=30")
+        self.assertEqual(analytics.status_code, 200)
+        self.assertEqual(analytics.json()["scan_count"], 2)
+        self.assertEqual(analytics.json()["fabric_distribution"]["cotton"], 1)
+        self.assertEqual(analytics.json()["confidence"]["buckets"]["90-100"], 1)
+
+        main.record_audit("admin_role_updated", "admin-1", "user-1", {"is_admin": True})
+        with patch.object(main, "require_admin", return_value={"uid": "admin-1"}):
+            audit = self.client.get("/api/admin/audit-log?page_size=10")
+        self.assertEqual(audit.status_code, 200)
+        self.assertEqual(audit.json()["count"], 1)
+        self.assertEqual(audit.json()["items"][0]["action"], "admin_role_updated")
+
 if __name__ == "__main__":
     unittest.main()
