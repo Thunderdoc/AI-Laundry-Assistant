@@ -477,5 +477,162 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertEqual(audit.json()["count"], 1)
         self.assertEqual(audit.json()["items"][0]["action"], "admin_role_updated")
 
+class TestFirebaseTokenVerification(unittest.TestCase):
+    """ID-token verification must work without a per-request call to Google.
+
+    google-auth refetches Google's x509 certificates on every verification, so a
+    slow or rate-limited certificate endpoint used to make every authenticated
+    API request fail right after a successful sign-in.
+    """
+
+    PROJECT = "laundry-ai-70989"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+
+    def setUp(self):
+        from app import main
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            import jwt as pyjwt
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            self.skipTest(f"token signing helpers are unavailable: {exc}")
+        self.main = main
+        self.pyjwt = pyjwt
+        self.serialization = serialization
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.private_key = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        self.public_key = key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode("utf-8")
+        self.key_id = "test-key-id"
+        self.rotated_key_id = "rotated-key-id"
+        self.certificate_requests = []
+        main._certificate_cache["certificates"] = {}
+        main._certificate_cache["expires_at"] = 0.0
+        self.environment = patch.dict(main.FIREBASE_CONFIG, {
+            "apiKey": "test-api-key",
+            "authDomain": f"{self.PROJECT}.firebaseapp.com",
+            "projectId": self.PROJECT,
+            "appId": "1:123:web:test",
+        })
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def certificate_document(self, *key_ids):
+        return json.dumps({key_id: self.public_key for key_id in (key_ids or (self.key_id,))}).encode("utf-8")
+
+    def patch_certificate_endpoint(self, document=None, failure=None):
+        main = self.main
+
+        class FakeResponse:
+            headers = {"Cache-Control": "public, max-age=3600"}
+
+            def __init__(self, body):
+                self._body = body
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            self.certificate_requests.append(request.full_url)
+            if failure is not None:
+                raise failure
+            if document is not None:
+                return FakeResponse(document)
+            key_ids = (self.key_id, self.rotated_key_id) if len(self.certificate_requests) > 1 else (self.key_id,)
+            return FakeResponse(self.certificate_document(*key_ids))
+
+        return patch.object(main.urlrequest, "urlopen", fake_urlopen)
+
+    def token(self, key_id=None, expires_in=3600, audience=None, issuer=None):
+        import time
+        issued = int(time.time())
+        return self.pyjwt.encode(
+            {
+                "iss": issuer or f"https://securetoken.google.com/{self.PROJECT}",
+                "aud": audience or self.PROJECT,
+                "sub": "firebase-uid-42",
+                "iat": issued,
+                "exp": issued + expires_in,
+                "email": "admin@example.com",
+                "email_verified": True,
+            },
+            self.private_key,
+            algorithm="RS256",
+            headers={"kid": key_id or self.key_id},
+        )
+
+    def test_certificates_are_cached_between_verifications(self):
+        with self.patch_certificate_endpoint():
+            for _ in range(5):
+                token = self.client.post("/api/auth/firebase", json={"id_token": self.token()})
+                self.assertEqual(token.status_code, 200)
+        self.assertEqual(len(self.certificate_requests), 1)
+
+    def test_verified_token_exposes_the_firebase_uid(self):
+        admin_emails = self.main.ADMIN_EMAILS
+        try:
+            self.main.ADMIN_EMAILS = {"admin@example.com"}
+            with self.patch_certificate_endpoint():
+                response = self.client.post("/api/auth/firebase", json={"id_token": self.token()})
+        finally:
+            self.main.ADMIN_EMAILS = admin_emails
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["uid"], "firebase-uid-42")
+        self.assertTrue(response.json()["is_admin"])
+
+    def test_rotated_signing_key_triggers_one_refresh(self):
+        with self.patch_certificate_endpoint():
+            self.assertEqual(self.client.post("/api/auth/firebase", json={"id_token": self.token()}).status_code, 200)
+            rotated = self.client.post("/api/auth/firebase", json={"id_token": self.token(self.rotated_key_id)})
+        self.assertEqual(rotated.status_code, 200)
+        self.assertEqual(len(self.certificate_requests), 2)
+
+    def test_rejected_tokens_never_grant_access(self):
+        from fastapi import HTTPException
+        cases = {
+            "expired": self.token(expires_in=-30),
+            "wrong audience": self.token(audience="another-project"),
+            "wrong issuer": self.token(issuer="https://securetoken.google.com/attacker"),
+            "unknown key": self.token(key_id="never-published"),
+            "malformed": "not-a-jwt",
+        }
+        with self.patch_certificate_endpoint():
+            for label, token in cases.items():
+                with self.subTest(label):
+                    response = self.client.get("/api/history", headers={"Authorization": f"Bearer {token}"})
+                    self.assertEqual(response.status_code, 401, response.text)
+                    self.assertTrue(response.json()["detail"])
+
+    def test_unreachable_certificate_endpoint_reports_service_unavailable(self):
+        with self.patch_certificate_endpoint(failure=OSError("certificate endpoint unreachable")):
+            response = self.client.get("/api/history", headers={"Authorization": f"Bearer {self.token()}"})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Firebase verification is temporarily unavailable.")
+
+    def test_missing_project_configuration_is_reported(self):
+        with patch.dict(self.main.FIREBASE_CONFIG, {"projectId": "", "apiKey": ""}):
+            response = self.client.post("/api/auth/firebase", json={"id_token": self.token()})
+        self.assertEqual(response.status_code, 503)
+
+
 if __name__ == "__main__":
     unittest.main()
