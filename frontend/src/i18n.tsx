@@ -27,6 +27,8 @@ const en: Record<string, string> = {
   "cta.analyze": "Analyze Garment",
 
   "login.eyebrow": "FABRIC CARE INTELLIGENCE",
+  "login.back": "Keep exploring",
+  "landing.signIn": "Sign in",
   "login.title": "Welcome back",
   "login.copy": "Sign in to analyze garments and access your personalized fabric-care guidance.",
   "login.login": "LOGIN",
@@ -107,6 +109,8 @@ const es: typeof en = {
   "cta.analyze": "Analizar prenda",
 
   "login.eyebrow": "INTELIGENCIA DE CUIDADO TEXTIL",
+  "login.back": "Seguir explorando",
+  "landing.signIn": "Iniciar sesión",
   "login.title": "Bienvenido de nuevo",
   "login.copy": "Inicia sesión para analizar prendas y acceder a tu guía personalizada de cuidado textil.",
   "login.login": "INICIAR SESIÓN",
@@ -187,6 +191,8 @@ const de: typeof en = {
   "cta.analyze": "Gestück analysieren",
 
   "login.eyebrow": "TEXTILPFLEGE-INTELLIGENZ",
+  "login.back": "Weiter entdecken",
+  "landing.signIn": "Anmelden",
   "login.title": "Willkommen zurück",
   "login.copy": "Melde dich an, um Kleidung zu analysieren und deine persönliche Textilpflege-Empfehlung zu erhalten.",
   "login.login": "ANMELDEN",
@@ -267,6 +273,8 @@ const fr: typeof en = {
   "cta.analyze": "Analyser un vêtement",
 
   "login.eyebrow": "INTELLIGENCE D'ENTRETIEN TEXTILE",
+  "login.back": "Continuer à explorer",
+  "landing.signIn": "Se connecter",
   "login.title": "Bon retour",
   "login.copy": "Connectez-vous pour analyser vos vêtements et accéder à vos conseils d'entretien personnalisés.",
   "login.login": "CONNEXION",

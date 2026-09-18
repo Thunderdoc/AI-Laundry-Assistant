@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { MotionPanel } from "../motion-primitives";
 import {
   API,
@@ -10,6 +10,68 @@ import {
   type DatasetStats,
   type SignedInUser,
 } from "../lib";
+
+type AdminAnalytics = {
+  days: number;
+  scan_count: number;
+  fabric_distribution: Record<string, number>;
+  confidence: { average: number | null; buckets: Record<string, number> };
+  daily_trend: { date: string; count: number }[];
+};
+
+const CONFIDENCE_BUCKETS: [string, string][] = [
+  ["Excellent · 90–100%", "90-100"],
+  ["High · 75–89%", "75-89"],
+  ["Medium · 50–74%", "50-74"],
+  ["Low · 0–49%", "0-49"],
+];
+
+/** Fill every day of the window so the trend line is continuous, not sparse. */
+function buildTrend(trend: { date: string; count: number }[], days = 30): { date: string; count: number }[] {
+  const byDate = new Map(trend.map((point) => [point.date, point.count]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const out: { date: string; count: number }[] = [];
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const day = new Date(today);
+    day.setDate(day.getDate() - offset);
+    const key = day.toISOString().slice(0, 10);
+    out.push({ date: key, count: byDate.get(key) ?? 0 });
+  }
+  return out;
+}
+
+/** Pure-SVG area chart — no chart library, scales to its container. */
+function TrendChart({ series }: { series: { date: string; count: number }[] }) {
+  const w = 720;
+  const h = 190;
+  const padX = 8;
+  const padTop = 14;
+  const padBottom = 10;
+  const max = Math.max(1, ...series.map((day) => day.count));
+  const n = series.length;
+  const x = (index: number) => padX + (index * (w - padX * 2)) / Math.max(1, n - 1);
+  const y = (count: number) => padTop + (1 - count / max) * (h - padTop - padBottom);
+  const line = series.map((day, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${y(day.count).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(n - 1).toFixed(1)},${(h - padBottom).toFixed(1)} L${x(0).toFixed(1)},${(h - padBottom).toFixed(1)} Z`;
+  const formatTick = (date: string) => new Date(`${date}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric" });
+  return (
+    <div className="admin-trend-chart">
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Daily scan volume, last 30 days">
+        {[1, 0.5, 0].map((fraction) => (
+          <line key={fraction} x1={padX} x2={w - padX} y1={y(max * fraction)} y2={y(max * fraction)} className="trend-gridline" vectorEffect="non-scaling-stroke" />
+        ))}
+        <path d={area} className="trend-area" />
+        <path d={line} className="trend-line" fill="none" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="trend-axis" aria-hidden="true">
+        <span>{formatTick(series[0].date)}</span>
+        <span>{formatTick(series[Math.floor((n - 1) / 2)].date)}</span>
+        <span>{formatTick(series[n - 1].date)}</span>
+      </div>
+    </div>
+  );
+}
 
 function AdminFeedbackPreview({ item }: { item: AdminFeedbackItem }) {
   const [source, setSource] = useState<string | null>(null);
@@ -53,6 +115,8 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
   const [adminTab, setAdminTab] = useState<"overview" | "review" | "users" | "model">("overview");
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
   const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
+  const [analytics, setAnalytics] = useState<AdminAnalytics | null>(null);
+  const [reviewFocus, setReviewFocus] = useState(0);
 
   // Users are loaded lazily: the Firebase user directory is the heaviest admin
   // call, and most visits start in Overview/Review — not on the Users tab.
@@ -88,12 +152,13 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
       setAdminLoading(true);
       setAdminMessage("");
       setAdminPanelLoading({ overview: true, feedback: true, scans: true, audit: true, health: true });
-      const [healthResponse, overviewResponse, feedbackResponse, scansResponse, auditResponse] = await Promise.all([
+      const [healthResponse, overviewResponse, feedbackResponse, scansResponse, auditResponse, analyticsResponse] = await Promise.all([
         fetch(`${API}/health`, { cache: "no-store" }).catch(() => null),
         apiFetch(`${API}/admin/overview`).catch(() => null),
         apiFetch(`${API}/admin/feedback`).catch(() => null),
         apiFetch(`${API}/admin/scans`).catch(() => null),
         apiFetch(`${API}/admin/audit-log`).catch(() => null),
+        apiFetch(`${API}/admin/analytics?days=30`).catch(() => null),
       ]);
       const nextErrors: Record<string, string> = {};
       if (healthResponse?.ok) setAdminHealth(await healthResponse.json());
@@ -124,6 +189,9 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
       } else if (auditResponse?.status !== 404) {
         nextErrors.audit = "Audit history temporarily unavailable.";
       }
+      if (analyticsResponse && analyticsResponse.ok) {
+        setAnalytics(await analyticsResponse.json());
+      }
       setAdminErrors(nextErrors);
       setAdminPanelLoading({});
       setAdminLastUpdated(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
@@ -140,6 +208,18 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
     return () => { if (timer) window.clearInterval(timer); };
   }, [user.is_admin, adminOverview?.retraining?.status, adminRefreshKey]);
 
+  const approveItem = useCallback(async (item: AdminFeedbackItem) => {
+    const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`, { method: "POST" });
+    if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
+    else setAdminMessage("Could not approve this feedback item.");
+  }, []);
+  const rejectItem = useCallback(async (item: AdminFeedbackItem) => {
+    if (!window.confirm("Reject this feedback image?")) return;
+    const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}`, { method: "DELETE" });
+    if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
+    else setAdminMessage("Could not reject this feedback item.");
+  }, []);
+
   const normalizedReviewQuery = reviewQuery.trim().toLowerCase();
   const filteredFeedback = adminFeedback.filter((item) =>
     !normalizedReviewQuery || [item.fabric, item.original_fabric, item.filename, item.file].some((value) => String(value || "").toLowerCase().includes(normalizedReviewQuery))
@@ -153,14 +233,40 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
   const filteredUsers = adminUsers.filter((account) =>
     !userQuery.trim() || [account.name, account.email, account.uid].some((value) => String(value || "").toLowerCase().includes(userQuery.trim().toLowerCase()))
   );
-  const trendDays = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-    const key = date.toISOString().slice(0, 10);
-    return { key, label: date.toLocaleDateString([], { weekday: "short" }), count: adminScans.filter((scan) => String(scan.created_at || "").slice(0, 10) === key).length };
-  });
-  const trendMax = Math.max(1, ...trendDays.map((day) => day.count));
+
+  // Keyboard-first review: arrows move focus, A/Enter approve, R rejects.
+  useEffect(() => {
+    if (adminTab !== "review" || reviewSubtab !== "pending") return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+      const list = filteredFeedback;
+      if (!list.length) return;
+      if (event.key === "ArrowDown" || event.key === "j") {
+        event.preventDefault();
+        setReviewFocus((focus) => (focus + 1) % list.length);
+      } else if (event.key === "ArrowUp" || event.key === "k") {
+        event.preventDefault();
+        setReviewFocus((focus) => (focus - 1 + list.length) % list.length);
+      } else if (event.key === "a" || event.key === "A" || event.key === "Enter") {
+        event.preventDefault();
+        if (list[reviewFocus]) void approveItem(list[reviewFocus]);
+      } else if (event.key === "r" || event.key === "R") {
+        if (list[reviewFocus]) void rejectItem(list[reviewFocus]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [adminTab, reviewSubtab, filteredFeedback, reviewFocus, approveItem, rejectItem]);
+
+  useEffect(() => {
+    setReviewFocus(0);
+  }, [adminTab, reviewSubtab, reviewQuery, reviewFilter]);
+
+  useEffect(() => {
+    document.querySelector(".admin-review-row.review-focused")?.scrollIntoView({ block: "nearest" });
+  }, [reviewFocus]);
+  const trendSeries = buildTrend(analytics?.daily_trend || []);
 
   return (
         <main className="admin-page">
@@ -169,7 +275,7 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
             <div className="admin-topbar-id">
               <span className="admin-topbar-mark" aria-hidden>🧺</span>
               <div>
-                <b>Administration</b>
+                <b>Control Room</b>
                 <small>{user.email || user.name} · Verified administrator</small>
               </div>
             </div>
@@ -195,7 +301,7 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
           {/* Four tabs — the entire console */}
           <nav className="admin-tabs-minimal" role="tablist" aria-label="Admin sections">
             {([
-              ["overview", "Overview"],
+              ["overview", "Control Room"],
               ["review", adminFeedback.length ? `Review · ${adminFeedback.length}` : "Review"],
               ["users", adminUsers.length ? `Users · ${adminUsers.length}` : "Users"],
               ["model", "Model"],
@@ -226,7 +332,7 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
 
             {adminTab === "overview" && (
               <>
-                {/* 4 KPIs only — the first one is the action the admin most often needs */}
+                {/* KPIs — the numbers an operator checks first */}
                 <section className="admin-kpi-grid" aria-label="Key numbers">
                   <button type="button" className={`admin-kpi ${adminFeedback.length ? "attention" : ""}`} onClick={() => setAdminTab("review")}>
                     <span>Pending reviews</span>
@@ -239,29 +345,100 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
                     <small>Recorded analyses</small>
                   </div>
                   <div>
-                    <span>Active users</span>
-                    <b>{adminPanelLoading.users ? "…" : adminUsers.length || "—"}</b>
-                    <small>Firebase accounts</small>
+                    <span>Scans · last 30 days</span>
+                    <b>{adminPanelLoading.overview ? "…" : analytics?.scan_count ?? "—"}</b>
+                    <small>{analytics ? `avg ${(analytics.scan_count / analytics.days).toFixed(1)}/day` : "Rolling window"}</small>
                   </div>
                   <div>
-                    <span>Dataset samples</span>
-                    <b>{adminPanelLoading.overview ? "…" : adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b>
-                    <small>Across supported classes</small>
+                    <span>Avg confidence</span>
+                    <b>{adminPanelLoading.overview ? "…" : analytics?.confidence?.average != null ? `${analytics.confidence.average.toFixed(1)}%` : "—"}</b>
+                    <small>Model certainty, recent scans</small>
                   </div>
                 </section>
 
+                {/* System readiness — one glance tells you what is online */}
+                <section className="admin-readiness" aria-label="System readiness">
+                  <span className={`readiness-pill ${adminOverview?.model_ready ? "ok" : "warn"}`}>
+                    <i aria-hidden /> Model {adminOverview == null ? "checking…" : adminOverview.model_ready ? "ready" : "not ready"}
+                  </span>
+                  <span className={`readiness-pill ${adminHealth?.status === "ok" ? "ok" : adminHealth ? "warn" : "pending"}`}>
+                    <i aria-hidden /> API {adminHealth?.status || "checking…"}
+                  </span>
+                  <span className="readiness-pill pending">
+                    <i aria-hidden /> Data {adminOverview?.persistence?.backend === "firebase" ? "Firebase" : "local"}
+                  </span>
+                  <span className="readiness-pill pending">
+                    <i aria-hidden /> Users {usersLoaded ? adminUsers.length : "…"}
+                  </span>
+                  {adminOverview?.retraining?.status === "running" && (
+                    <span className="readiness-pill running"><i aria-hidden /> Retraining live</span>
+                  )}
+                </section>
+
                 <div className="admin-overview-grid">
-                  <section className="admin-panel-card">
+                  <section className="admin-panel-card admin-wide">
                     <div className="admin-section-heading">
-                      <div><span className="admin-eyebrow">ACTIVITY</span><h2>Scans this week</h2></div>
-                      <span className="admin-count">{adminScans.length ? "Last 7 days" : "No scan data"}</span>
+                      <div><span className="admin-eyebrow">ACTIVITY</span><h2>Scans — last 30 days</h2></div>
+                      <span className="admin-count">{analytics ? `${analytics.scan_count} scans` : "No scan data yet"}</span>
                     </div>
-                    {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan activity…</p> : adminScans.length ? <div className="admin-trend" aria-label="Seven day scan activity">
-                      {trendDays.map((day) => <div className="admin-trend-day" key={day.key}><strong>{day.count}</strong><div className="admin-trend-bar"><i style={{ height: `${Math.max(8, day.count / trendMax * 100)}%` }} /></div><small>{day.label}</small></div>)}
-                    </div> : <p className="admin-empty">Scan activity will appear after the API records scans.</p>}
+                    {adminPanelLoading.overview ? <p className="admin-panel-loading" role="status">Loading 30-day trend…</p> : trendSeries.some((day) => day.count > 0) ? (
+                      <>
+                        <TrendChart series={trendSeries} />
+                        <div className="trend-chips">
+                          <span><b>{analytics?.scan_count ?? 0}</b> scans in window</span>
+                          <span><b>{Math.max(...trendSeries.map((day) => day.count))}</b> peak day</span>
+                          <span><b>{trendSeries.reduce((sum, day) => sum + day.count, 0) > 0 ? trendSeries.filter((day) => day.count > 0).length : 0}</b> active days</span>
+                        </div>
+                      </>
+                    ) : <p className="admin-empty">Scan activity will appear after the API records scans.</p>}
                   </section>
 
                   <section className="admin-panel-card">
+                    <div className="admin-section-heading">
+                      <div><span className="admin-eyebrow">TRUST</span><h2>Confidence health</h2></div>
+                      <span className="admin-count">{analytics?.confidence?.average != null ? `avg ${analytics.confidence.average}%` : "No data"}</span>
+                    </div>
+                    {analytics && analytics.scan_count > 0 ? (
+                      (() => {
+                        const buckets = analytics.confidence.buckets;
+                        const maximum = Math.max(1, ...CONFIDENCE_BUCKETS.map(([, key]) => buckets[key] || 0));
+                        return <div className="admin-conf-grid">
+                          {CONFIDENCE_BUCKETS.map(([label, key]) => (
+                            <div className="admin-conf-row" key={key}>
+                              <span>{label}</span>
+                              <div><i style={{ width: `${Math.max(3, ((buckets[key] || 0) / maximum) * 100)}%` }} /></div>
+                              <b>{buckets[key] || 0}</b>
+                            </div>
+                          ))}
+                        </div>;
+                      })()
+                    ) : <p className="admin-empty">Confidence data appears after the first scan.</p>}
+                  </section>
+
+                  <section className="admin-panel-card">
+                    <div className="admin-section-heading">
+                      <div><span className="admin-eyebrow">MIX</span><h2>Fabrics — last 30 days</h2></div>
+                      <span className="admin-count">{analytics?.scan_count ?? 0} scans</span>
+                    </div>
+                    {analytics && Object.values(analytics.fabric_distribution).some((value) => value > 0) ? (
+                      (() => {
+                        const entries = Object.entries(analytics.fabric_distribution).filter(([, value]) => value > 0).sort((a, b) => b[1] - a[1]);
+                        const maximum = entries[0][1];
+                        return <div className="admin-hbar-list">
+                          {entries.map(([label, value]) => (
+                            <div className="admin-hbar" key={label}>
+                              <span>{label.replace("_", " ")}</span>
+                              <div><i style={{ width: `${Math.max(3, (value / maximum) * 100)}%` }} /></div>
+                              <b>{value}</b>
+                            </div>
+                          ))}
+                        </div>;
+                      })()
+                    ) : <p className="admin-empty">Fabric mix appears after the first scan.</p>}
+                  </section>
+                </div>
+
+                <section className="admin-panel-card">
                     <div className="admin-section-heading">
                       <div><span className="admin-eyebrow">DATASET</span><h2>Class balance</h2></div>
                       <span className="admin-count">{adminOverview?.dataset?.total_samples ?? 0} samples</span>
@@ -273,7 +450,6 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
                       })}
                     </div>
                   </section>
-                </div>
 
                 <section className="admin-panel-card">
                   <div className="admin-section-heading">
@@ -353,8 +529,15 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
 
               {reviewSubtab === "pending" && (
                 <>
-                  {adminPanelLoading.feedback ? <p className="admin-panel-loading" role="status">Loading feedback queue…</p> : filteredFeedback.length ? filteredFeedback.map((item) => (
-                    <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
+                  {!adminPanelLoading.feedback && filteredFeedback.length > 0 && (
+                    <div className="admin-review-hint" aria-hidden="true">
+                      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+                      <span><kbd>A</kbd> / <kbd>Enter</kbd> approve</span>
+                      <span><kbd>R</kbd> reject</span>
+                    </div>
+                  )}
+                  {adminPanelLoading.feedback ? <p className="admin-panel-loading" role="status">Loading feedback queue…</p> : filteredFeedback.length ? filteredFeedback.map((item, index) => (
+                    <article className={`admin-review-row ${reviewFocus === index ? "review-focused" : ""}`} key={`${item.fabric}/${item.file}`}>
                       <AdminFeedbackPreview item={item} />
                       <div className="admin-review-copy">
                         <strong>{item.fabric}</strong>
@@ -362,17 +545,8 @@ export default function AdminConsole({ user, datasetStats }: { user: SignedInUse
                         <small>{item.filename || item.file}</small>
                       </div>
                       <div className="admin-row-actions">
-                        <button type="button" className="btn btn-primary" onClick={async () => {
-                          const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`, { method: "POST" });
-                          if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
-                          else setAdminMessage("Could not approve this feedback item.");
-                        }}>Approve label</button>
-                        <button type="button" className="btn btn-outline" onClick={async () => {
-                          if (!window.confirm("Reject this feedback image?")) return;
-                          const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}`, { method: "DELETE" });
-                          if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
-                          else setAdminMessage("Could not reject this feedback item.");
-                        }}>Reject</button>
+                        <button type="button" className="btn btn-primary" onClick={() => void approveItem(item)}>Approve label</button>
+                        <button type="button" className="btn btn-outline" onClick={() => void rejectItem(item)}>Reject</button>
                       </div>
                     </article>
                   )) : <p className="admin-empty">{adminFeedback.length ? "No feedback matches this search." : "No feedback is waiting for review. New user corrections will appear here for approval."}</p>}

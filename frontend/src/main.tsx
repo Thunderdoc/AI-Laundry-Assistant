@@ -25,9 +25,13 @@ import {
   type SignedInUser,
   type TempUnit,
 } from "./lib";
-import { FABRICS_DATA, PRESET_TAGS, STAIN_GUIDE } from "./data";
+import { PRESET_TAGS, STAIN_GUIDE } from "./data";
 import { LANGS, LangProvider, useI18n } from "./i18n";
 import AdminConsole from "./components/AdminConsole";
+import HomePage from "./components/HomePage";
+import LibraryPage from "./components/LibraryPage";
+import SiteFooter from "./components/SiteFooter";
+import PublicLanding from "./components/PublicLanding";
 import CareAssistant from "./components/CareAssistant";
 import CareSymbols from "./components/CareSymbols";
 import HistoryPage from "./components/HistoryPage";
@@ -56,6 +60,7 @@ function AuthGate() {
   const [isRegistering, setIsRegistering] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
   const [verificationPending, setVerificationPending] = useState(false);
+  const [authMode, setAuthMode] = useState<"landing" | "login">("landing");
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -242,9 +247,14 @@ function AuthGate() {
   };
 
   if (user) return <App user={user} onSignOut={handleSignOut} />;
-  return (
+
+  if (authMode === "login") {
+    return (
     <main className="login-shell">
       <Reveal className="login-panel" aria-labelledby="login-title">
+        <button type="button" className="login-back" onClick={() => setAuthMode("landing")}>
+          ← {t("login.back")}
+        </button>
         <div className="login-brand"><div className="login-mark">🧺</div><span>Laundry<span>AI</span></span></div>
         <p className="login-eyebrow">{t("login.eyebrow")}</p>
         <h1 id="login-title"><TextEffect>{t("login.title")}</TextEffect></h1>
@@ -282,7 +292,12 @@ function AuthGate() {
         <div className="login-aside-footer"><span className="live-dot" /> Secure authentication · AI-assisted guidance</div>
       </Reveal>
     </main>
-  );
+    );
+  }
+
+  // First-time visitors browse the platform freely; the login screen only
+  // appears when they choose to sign in.
+  return <PublicLanding onSignIn={() => setAuthMode("login")} />;
 }
 
 type Page = "home" | "analyze" | "insights" | "library" | "history" | "assistant" | "admin" | "about";
@@ -417,7 +432,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [datasetStats, setDatasetStats] = useState<DatasetStats | undefined>();
   const [modelMetrics, setModelMetrics] = useState<any>(null);
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
-  const [compareActive, setCompareActive] = useState(false);
   const [stream, setStream] = useState<MediaStream | undefined>();
   const [cameraFacing, setCameraFacing] = useState<"user" | "environment">("environment");
   const [note, setNote] = useState("");
@@ -886,184 +900,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           HOME PAGE
           ======================================================== */}
       {page === "home" && (
-        <MotionPage className="page-container">
-          {/* Hero Section */}
-          <section className="hero-grid">
-            <Reveal className="hero-left">
-              <span className="eyebrow">{t("hero.eyebrow")}</span>
-              <h1>
-                <TextEffect>{t("hero.title")}</TextEffect> <br />
-                <span className="serif">{t("hero.titleSerif")}</span>
-              </h1>
-              <p className="lead">
-                {t("hero.lead")}
-              </p>
-              <div className="hero-actions">
-                <MotionButton whileHover={{ y: -3 }} whileTap={{ scale: .98 }} className="btn btn-primary" onClick={() => setPage("analyze")}>
-                  {t("hero.primary")} →
-                </MotionButton>
-                <button className="btn btn-secondary" onClick={() => setPage("library")}>
-                  {t("hero.secondary")}
-                </button>
-              </div>
-              <div className="trust-badge">
-                <span>🛡️ Computer vision assisted</span>
-                <span>•</span>
-                <span>Evidence-led</span>
-                <span>•</span>
-                <span>Care labels authoritative</span>
-              </div>
-            </Reveal>
-
-            {/* Right Interactive Scanner Simulation */}
-            <Reveal className="hero-right" delay={.12}>
-              <div className="scanner-card">
-                <div className="scanner-viewbox">
-                  <div className="macro-fabric-bg">
-                    <div className="fabric-grid-overlay"></div>
-                    <div className="laser-scan-line"></div>
-                    <div className="scan-target-box">🌱</div>
-                  </div>
-                </div>
-                <div className="scanner-footer">
-                  <div className="scanner-pill">
-                    <span className="dot"></span>
-                    <span>AI Vision: <b>Cotton (94.2%)</b></span>
-                  </div>
-                  <span style={{ fontSize: "12px", color: "var(--sage)" }}>Quality: Verified</span>
-                </div>
-              </div>
-            </Reveal>
-          </section>
-
-          {/* 5-Step Pipeline Section */}
-          <section className="pipeline-section">
-            <div className="section-header">
-              <span className="eyebrow">METHODOLOGY PIPELINE</span>
-              <h2>How LaundryAI Works</h2>
-              <p>A transparent 5-stage computer vision and expert rule system from raw image to sustainable care.</p>
-            </div>
-            <div className="pipeline-grid">
-              <div className="pipeline-step">
-                <div className="step-num">01 / INPUT</div>
-                <div className="step-title">Capture</div>
-                <div className="step-desc">Upload or photograph garment with automatic resolution and lighting pre-checks.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">02 / VISION</div>
-                <div className="step-title">Feature Extract</div>
-                <div className="step-desc">CNN layers analyze surface macro-texture, weave pattern, and optical luster.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">03 / CLASSIFY</div>
-                <div className="step-title">Inference & Gate</div>
-                <div className="step-desc">MobileNetV2 estimates class probabilities with confidence and margin gating.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">04 / RULE ENGINE</div>
-                <div className="step-title">Care Synthesis</div>
-                <div className="step-desc">Textile knowledge base generates safe wash temperature, cycle, and iron profiles.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">05 / ACTIVE LEARN</div>
-                <div className="step-title">Continuous Train</div>
-                <div className="step-desc">Human feedback automatically augments training sets for periodic model retraining.</div>
-              </div>
-            </div>
-          </section>
-
-          {/* Inside the Vision Engine */}
-          <section style={{ padding: "50px 0", borderTop: "1px solid var(--border)" }}>
-            <div className="section-header">
-              <span className="eyebrow">DEEP LEARNING CAPABILITIES</span>
-              <h2>Inside the Vision Engine</h2>
-              <p>What the computer vision model examines to distinguish delicate silks from heavy cotton twills.</p>
-            </div>
-            <div className="engine-grid">
-              <div className="engine-card">
-                <div className="engine-icon">🔍</div>
-                <h4>Texture</h4>
-                <p>Identifies micro-surface relief, fiber fuzziness, and roughness metrics.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">📐</div>
-                <h4>Weave Pattern</h4>
-                <p>Examines plain, twill, satin, or looped knit structural patterns.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">✨</div>
-                <h4>Optical Luster</h4>
-                <p>Distinguishes natural matte cottons from high-luster synthetics and silks.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">💬</div>
-                <h4>Context Notes</h4>
-                <p>Combines visual cues with optional user-supplied garment details.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">🛡️</div>
-                <h4>Confidence Gate</h4>
-                <p>Rejects low-certainty and non-fabric images to prevent false care guidance.</p>
-              </div>
-            </div>
-          </section>
-
-          {/* Supported Fabrics Showcase */}
-          <section style={{ padding: "50px 0", borderTop: "1px solid var(--border)" }}>
-            <div className="section-header">
-              <span className="eyebrow">TEXTILE INTELLIGENCE</span>
-              <h2>Supported Fabric Classes</h2>
-              <p>Explore our deep-care knowledge base across natural and synthetic materials.</p>
-            </div>
-            <div className="fabric-showcase-grid">
-              {Object.entries(FABRICS_DATA).map(([key, data]) => (
-                <div className="fabric-card-preview" key={key}>
-                  <div className="fabric-emoji">{data.emoji}</div>
-                  <h3>{data.name}</h3>
-                  <p>{data.overview}</p>
-                  <button
-                    className="btn btn-sage btn-sm"
-                    onClick={() => {
-                      setSelectedFabricKey(key);
-                      setPage("library");
-                    }}
-                  >
-                    View Care Spec →
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {/* Sustainability Highlight */}
-          <section className="sustainability-banner">
-            <div>
-              <span className="eyebrow" style={{ color: "#28E6A3" }}>SUSTAINABILITY FIRST</span>
-              <h2>Better Care. Lower Impact.</h2>
-              <p>
-                The right laundering conditions help garments last longer while reducing household water, energy, and microfiber pollution.
-              </p>
-            </div>
-            <div className="impact-pills-grid">
-              <div className="impact-pill">
-                <b>🌡️ Lower Temperatures</b>
-                <span>Saves up to 60% of washing electricity compared to hot cycles.</span>
-              </div>
-              <div className="impact-pill">
-                <b>🌬️ Air Drying</b>
-                <span>Eliminates tumble dryer energy and prevents thermal fiber wear.</span>
-              </div>
-              <div className="impact-pill">
-                <b>🌊 Gentler Agitation</b>
-                <span>Reduces mechanical friction and synthetic microfiber shedding.</span>
-              </div>
-              <div className="impact-pill">
-                <b>⏳ Extended Garment Life</b>
-                <span>Proper care prevents color fading, shrinkage, and premature disposal.</span>
-              </div>
-            </div>
-          </section>
-        </MotionPage>
+        <HomePage
+          isPublic={false}
+          onPrimaryCta={() => setPage("analyze")}
+          onLibrary={(key) => {
+            if (key) setSelectedFabricKey(key);
+            setPage("library");
+          }}
+        />
       )}
 
       {/* ========================================================
@@ -1871,139 +1715,10 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           FABRIC LIBRARY & COMPARISON
           ======================================================== */}
       {page === "library" && (
-        <MotionPage className="page-container">
-          <Reveal>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
-            <div>
-              <span className="eyebrow">TEXTILE KNOWLEDGE BASE</span>
-              <h1><TextEffect>{t("library.title")}</TextEffect></h1>
-            </div>
-            <MotionButton
-              whileHover={{ y: -2 }}
-              whileTap={{ scale: .985 }}
-              className="btn btn-secondary"
-              onClick={() => setCompareActive(!compareActive)}
-            >
-              {compareActive ? "View Single Fabric" : `📊 ${t("library.compare")}`}
-            </MotionButton>
-          </div>
-
-          {/* Comparison Matrix View */}
-          {compareActive ? (
-            <div className="comparison-table-wrapper">
-              <table className="comparison-table">
-                <thead>
-                  <tr>
-                    <th>Fabric Class</th>
-                    <th>Category</th>
-                    <th>Wash Temp</th>
-                    <th>Cycle</th>
-                    <th>Drying</th>
-                    <th>Ironing</th>
-                    <th>Shrinkage Risk</th>
-                    <th>Heat Sensitivity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(FABRICS_DATA).map(([key, data]) => (
-                    <tr key={key}>
-                      <td><b>{data.emoji} {data.name}</b></td>
-                      <td>{data.category}</td>
-                      <td>{data.washTemp}</td>
-                      <td>{data.cycle}</td>
-                      <td>{data.dry}</td>
-                      <td>{data.iron}</td>
-                      <td><span className={`tag-chip ${data.shrinkRisk === "High" ? "danger" : ""}`}>{data.shrinkRisk}</span></td>
-                      <td><span className="tag-chip">{data.heatSens}</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div>
-              {/* Fabric Picker Chips */}
-              <div className="tag-container" style={{ marginBottom: "28px" }}>
-                {Object.entries(FABRICS_DATA).map(([key, data]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`tag-chip ${selectedFabricKey === key ? "active" : ""}`}
-                    style={{
-                      background: selectedFabricKey === key ? "var(--primary)" : "var(--surface)",
-                      color: selectedFabricKey === key ? "#FFFFFF" : "var(--dark)",
-                      fontSize: "14px",
-                      padding: "8px 18px"
-                    }}
-                    onClick={() => setSelectedFabricKey(key)}
-                  >
-                    {data.emoji} {data.name}
-                  </button>
-                ))}
-              </div>
-
-              {/* Selected Fabric 6-Section Spec Card */}
-              {(() => {
-                const current = FABRICS_DATA[selectedFabricKey];
-                return (
-                  <div className="workspace-panel">
-                    <span className="eyebrow">{current.category}</span>
-                    <h2 style={{ fontSize: "36px", marginBottom: "8px" }}>{current.emoji} {current.name}</h2>
-                    <p style={{ color: "var(--text-muted)", fontSize: "16px", marginBottom: "28px" }}>{current.overview}</p>
-
-                    <div className="care-profile-grid">
-                      <div className="care-card">
-                        <div className="care-card-icon">🫧</div>
-                        <div className="care-card-label">WASH TEMP</div>
-                        <div className="care-card-value">{convertTempText(current.washTemp, tempUnit)}</div>
-                        <span style={{ fontSize: "12px", color: "var(--text-light)" }}>{current.cycle}</span>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">◌</div>
-                        <div className="care-card-label">DRYING</div>
-                        <div className="care-card-value">{current.dry}</div>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">♨</div>
-                        <div className="care-card-label">IRONING</div>
-                        <div className="care-card-value">{current.iron}</div>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">⚠️</div>
-                        <div className="care-card-label">SHRINKAGE</div>
-                        <div className="care-card-value">{current.shrinkRisk}</div>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">🔥</div>
-                        <div className="care-card-label">HEAT SENSITIVITY</div>
-                        <div className="care-card-value">{current.heatSens}</div>
-                      </div>
-                    </div>
-
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginTop: "24px" }}>
-                      <div className="rationale-box">
-                        <h4>Visual Characteristics (Computer Vision Cues)</h4>
-                        <p>{current.visual}</p>
-                      </div>
-                      <div className="rationale-box" style={{ background: "var(--warm-beige)", borderColor: "#DECDB5" }}>
-                        <h4 style={{ color: "var(--dark)" }}>Sustainability Impact</h4>
-                        <p>{current.sustainability}</p>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-          )}
-
-          <div style={{ marginTop: "40px" }}>
-            <CareSymbols />
-          </div>
-          </Reveal>
-        </MotionPage>
+        <LibraryPage initialKey={selectedFabricKey} tempUnit={tempUnit} />
       )}
 
-      {page === "history" && user.is_admin && <AdminConsole user={user} />}
+      {page === "admin" && user.is_admin && <AdminConsole user={user} />}
 
       {/* ========================================================
           HISTORY PAGE (My Scans)
@@ -2074,40 +1789,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       )}
 
       {/* Multi-Column Professional Footer */}
-      <footer className="app-footer">
-        <div className="footer-grid">
-          <div className="footer-brand">
-            <h3>🧺 LaundryAI</h3>
-            <p>AI-assisted fabric intelligence for safer, smarter, and more sustainable domestic garment care.</p>
-          </div>
-          <div className="footer-col">
-            <h4>Platform</h4>
-            <ul className="footer-links">
-              <li><button type="button" onClick={() => setPage("home")}>Home</button></li>
-              <li><button type="button" onClick={() => setPage("analyze")}>Analyze Garment</button></li>
-              <li><button type="button" onClick={() => setPage("insights")}>Model Transparency</button></li>
-              <li><button type="button" onClick={() => setPage("library")}>Fabric Care Guide</button></li>
-            </ul>
-          </div>
-          <div className="footer-col">
-            <h4>System</h4>
-            <ul className="footer-links">
-              <li><button type="button" onClick={() => setPage("about")}>How it works</button></li>
-              {user.is_admin && <li><button type="button" onClick={() => setPage("admin")}>Admin operations</button></li>}
-            </ul>
-          </div>
-          <div className="footer-col">
-            <h4>Important Notice</h4>
-            <div className="footer-disclaimer-box">
-              {t("footer.disclaimer")}
-            </div>
-          </div>
-        </div>
-        <div className="footer-bottom">
-          <span>© 2026 LaundryAI • Computer Vision × Textile Intelligence Platform</span>
-          <span>See the Fabric. Understand the Care.</span>
-        </div>
-      </footer>
+      <SiteFooter
+        onHome={() => setPage("home")}
+        onGuide={() => setPage("library")}
+        onResearch={() => setPage("insights")}
+        onAbout={() => setPage("about")}
+        onScan={() => setPage("analyze")}
+        onAdmin={user.is_admin ? () => setPage("admin") : undefined}
+      />
     </>
   );
 }

@@ -7,6 +7,9 @@
   --surface-card: #FAFBF8;
   
   --primary: #075C48;
+  --primary-dark: #054536;
+  --deep-green: #073E31;
+  --shadow-soft: 0 14px 34px rgba(16, 35, 29, .12);
   --primary-hover: #054536;
   --primary-light: #E7F2EC;
   --primary-border: #8BB9A4;
@@ -2916,4 +2919,123 @@ footer.app-footer {
 @media (max-width: 860px) {
   .header-tools { margin-left: 0; margin-right: 0; width: 100%; justify-content: space-between; }
   .lang-menu { min-width: 130px; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PUBLIC LANDING — what a first-time visitor sees before signing in
+   ════════════════════════════════════════════════════════════════════════ */
+.app-header.public-header { position: sticky; top: 0; z-index: 60; background: rgba(247, 250, 248, .94); backdrop-filter: blur(14px); border-bottom: 1px solid var(--border); }
+.public-nav { display: flex; gap: 4px; margin-left: 26px; }
+.public-nav button { padding: 9px 18px; border-radius: 999px; border: 0; background: transparent; font-weight: 700; font-size: 14px; color: var(--text-muted); cursor: pointer; transition: background .15s ease, color .15s ease; }
+.public-nav button:hover { background: rgba(15, 113, 82, .08); color: var(--dark); }
+.public-nav button.active { background: var(--deep-green); color: #fff; }
+.public-signin { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 11px 22px; border-radius: 999px; border: 0; background: linear-gradient(135deg, var(--primary), var(--deep-green)); color: #fff; font-weight: 800; font-size: 14px; cursor: pointer; box-shadow: var(--shadow-sm); transition: transform .18s ease, box-shadow .18s ease; }
+.public-signin:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+
+/* Evidence band — artifact-declared evaluation numbers, animated on scroll */
+.landing-numbers { margin-top: 34px; padding: 58px 7% 46px; background: radial-gradient(circle at 12% 0%, rgba(61, 202, 148, .18), transparent 44%), linear-gradient(140deg, #0a241d, #071914 62%); border-radius: 30px; }
+.landing-numbers-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 26px; }
+.landing-number b { display: block; font-size: clamp(28px, 3vw, 44px); font-weight: 900; letter-spacing: -1.2px; color: #2fe6a8; font-variant-numeric: tabular-nums; }
+.landing-number span { display: block; margin-top: 8px; font-size: 12.5px; font-weight: 600; line-height: 1.45; color: rgba(214, 236, 225, .75); }
+.landing-numbers-note { margin-top: 30px; padding-top: 18px; border-top: 1px solid rgba(151, 210, 184, .18); font-size: 12px; color: rgba(214, 236, 225, .55); }
+
+/* Feature wall — the working breadth of the platform */
+.feature-wall-section { padding: 80px 0 20px; }
+.feature-wall-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+.feature-card { position: relative; padding: 22px 20px 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface-card); transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.feature-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-md); border-color: rgba(15, 113, 82, .35); }
+.feature-icon { font-size: 26px; margin-bottom: 12px; }
+.feature-card h4 { font-size: 15px; font-weight: 800; margin-bottom: 8px; color: var(--dark); }
+.feature-card p { font-size: 12.5px; line-height: 1.55; color: var(--text-muted); }
+.feature-tag { position: absolute; top: 14px; right: 14px; font-size: 9.5px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; padding: 4px 9px; border-radius: 999px; background: rgba(15, 113, 82, .1); color: var(--primary); }
+
+/* Closing CTA band */
+.landing-cta { margin: 64px 0 10px; padding: 70px 8%; text-align: center; background: linear-gradient(140deg, #0d3a2d, #071914 65%); border-radius: 30px; color: #fff; }
+.landing-cta h2 { font-size: clamp(30px, 3.6vw, 46px); font-weight: 900; letter-spacing: -1px; margin-bottom: 14px; color: #fff; }
+.landing-cta p { max-width: 580px; margin: 0 auto 30px; color: rgba(226, 242, 233, .8); font-size: 15.5px; line-height: 1.6; }
+.btn-light { background: #fff; color: var(--deep-green); font-weight: 800; border: 0; }
+.btn-light:hover { transform: translateY(-2px); box-shadow: 0 14px 30px rgba(0, 0, 0, .28); }
+
+/* Live demo rotation inside the hero scanner card */
+.scanner-confidence { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+.scanner-confidence i { display: block; height: 100%; width: 8%; background: linear-gradient(90deg, #2fe6a8, #7ff0cf); animation: demo-scan-fill 2.8s ease forwards; }
+@keyframes demo-scan-fill { to { width: 94%; } }
+.scanner-demo-label { display: inline-block; animation: demo-fade .5s ease; }
+@keyframes demo-fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+/* Login: back-to-exploring affordance */
+.login-back { position: absolute; top: 16px; left: 20px; z-index: 3; border: 0; background: transparent; color: var(--text-muted); font-size: 12.5px; font-weight: 700; cursor: pointer; padding: 8px 12px; border-radius: 999px; transition: background .15s ease, color .15s ease; }
+.login-back:hover { background: rgba(15, 113, 82, .08); color: var(--primary); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   ADMIN CONTROL ROOM — readiness, 30-day trend, confidence & mix panels
+   ════════════════════════════════════════════════════════════════════════ */
+.admin-readiness { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; }
+.readiness-pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 999px; font-size: 12px; font-weight: 700; background: rgba(255, 255, 255, .05); border: 1px solid rgba(151, 210, 184, .16); color: #cfe4da; }
+.readiness-pill i { width: 8px; height: 8px; border-radius: 50%; background: #78968a; }
+.readiness-pill.ok i { background: #2fe6a8; box-shadow: 0 0 8px rgba(47, 230, 168, .8); }
+.readiness-pill.warn i { background: #f5b84d; box-shadow: 0 0 8px rgba(245, 184, 77, .7); }
+.readiness-pill.running i { background: #2fe6a8; animation: ui-pulse 1.2s ease infinite; }
+.admin-wide { grid-column: 1 / -1; }
+
+.admin-trend-chart svg { display: block; width: 100%; height: 210px; }
+.trend-gridline { stroke: rgba(151, 210, 184, .14); stroke-width: 1; stroke-dasharray: 4 5; }
+.trend-area { fill: rgba(47, 230, 168, .13); }
+.trend-line { stroke: #2fe6a8; stroke-width: 2.4; stroke-linejoin: round; stroke-linecap: round; }
+.trend-axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; font-weight: 600; color: rgba(207, 228, 218, .55); }
+.trend-chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.trend-chips span { padding: 8px 14px; border-radius: 12px; background: rgba(255, 255, 255, .04); border: 1px solid rgba(151, 210, 184, .14); font-size: 12px; color: #cfe4da; }
+.trend-chips b { color: #2fe6a8; font-size: 14px; margin-right: 4px; }
+
+.admin-conf-grid, .admin-hbar-list { display: grid; gap: 12px; }
+.admin-conf-row, .admin-hbar { display: grid; grid-template-columns: 118px 1fr 34px; align-items: center; gap: 12px; font-size: 12px; font-weight: 600; color: #cfe4da; }
+.admin-conf-row div, .admin-hbar div { height: 9px; border-radius: 999px; background: rgba(255, 255, 255, .06); overflow: hidden; }
+.admin-conf-row i, .admin-hbar i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #177255, #2fe6a8); }
+.admin-conf-row b, .admin-hbar b { text-align: right; color: #eaf6f0; font-variant-numeric: tabular-nums; }
+
+/* Keyboard-first review queue */
+.admin-review-hint { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 14px; font-size: 11.5px; color: rgba(207, 228, 218, .6); }
+.admin-review-hint kbd { display: inline-block; min-width: 20px; text-align: center; padding: 2px 6px; margin-right: 3px; border-radius: 6px; border: 1px solid rgba(151, 210, 184, .3); background: rgba(255, 255, 255, .05); font-family: inherit; font-size: 10.5px; font-weight: 700; color: #cfe4da; }
+.admin-review-row.review-focused { outline: 2px solid #2fe6a8; outline-offset: -2px; box-shadow: 0 0 0 4px rgba(47, 230, 168, .12), 0 16px 44px rgba(0, 0, 0, .16); }
+
+/* ════════════════════════════════════════════════════════════════════════
+   RESPONSIVE PASS — mobile & tablet fixes for the new surfaces
+   ════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 1024px) {
+  .landing-numbers-grid { grid-template-columns: repeat(3, 1fr); }
+  .feature-wall-grid { grid-template-columns: repeat(3, 1fr); }
+  .public-nav { margin-left: 14px; }
+}
+
+@media (max-width: 768px) {
+  /* Header: brand · tools · menu · avatar — stable order, no overlap */
+  .app-header .header-tools { order: 2; margin-left: auto; }
+  .app-header .mobile-menu { order: 3; margin-left: 0; }
+  .app-header .account-chip { order: 4; }
+  .app-header nav.main-nav { order: 5; }
+  .public-nav { margin-left: 8px; }
+  .public-nav button { padding: 8px 12px; font-size: 13px; }
+  .public-signin { padding: 9px 14px; font-size: 13px; }
+  .public-signin span { display: none; }
+  .landing-cta { padding: 52px 7%; }
+  .workspace-stepper { padding: 6px 10px; gap: 4px; }
+  .workspace-stepper .step-indicator { font-size: 11px; padding: 5px 8px; gap: 5px; }
+  .workspace-stepper .step-indicator .step-circle { display: none; }
+  .workspace-stepper > span { font-size: 10px; }
+}
+
+@media (max-width: 540px) {
+  .landing-numbers { padding: 42px 6% 36px; }
+  .landing-numbers-grid { grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .feature-wall-grid { grid-template-columns: 1fr; }
+  .feature-card { padding: 18px 16px; }
+  .history-row { flex-wrap: wrap; }
+  .history-row .history-actions { width: 100%; justify-content: flex-end; }
+  .assistant-input { flex-wrap: wrap; }
+  .assistant-input .text-field { flex-basis: 100%; }
+  .assistant-input button { width: 100%; }
+  .admin-readiness { gap: 8px; }
+  .readiness-pill { padding: 6px 11px; font-size: 11px; }
+  .admin-conf-row, .admin-hbar { grid-template-columns: 84px 1fr 30px; gap: 8px; }
+  .trend-chips span { padding: 7px 10px; font-size: 11px; }
 }
