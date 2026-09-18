@@ -285,14 +285,39 @@ def request_uid(request: Request) -> str:
     user = getattr(request.state, "user", None)
     return str(user.get("uid")) if user and user.get("uid") else "local-preview"
 
+# Production scale: in Firebase mode every read pulls the entire predictions
+# node, and the admin endpoints (overview + scans + analytics) do that several
+# times on each console visit. A short-lived, write-invalidated cache collapses
+# those repeated full fetches. SQLite (development) stays uncached because it is
+# cheap locally and the test suite writes to it directly.
+_HISTORY_CACHE_TTL_SECONDS = float(os.getenv("HISTORY_CACHE_TTL", "15"))
+_RAW_HISTORY_CACHE: dict = {"rows": None, "expires_at": 0.0}
+
+def _invalidate_history_cache() -> None:
+    _RAW_HISTORY_CACHE["rows"] = None
+    _RAW_HISTORY_CACHE["expires_at"] = 0.0
+
+def _cached_firebase_history() -> list[dict]:
+    now = time.monotonic()
+    if _RAW_HISTORY_CACHE["rows"] is not None and now < _RAW_HISTORY_CACHE["expires_at"]:
+        return _RAW_HISTORY_CACHE["rows"]
+    if not firebase_store.configured():
+        raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
+    try:
+        rows = firebase_store.call_with_timeout(firebase_store.list_predictions)
+    except Exception as exc:
+        raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
+    if _HISTORY_CACHE_TTL_SECONDS > 0:
+        _RAW_HISTORY_CACHE["rows"] = rows
+        _RAW_HISTORY_CACHE["expires_at"] = now + _HISTORY_CACHE_TTL_SECONDS
+    return rows
+
 def saved_history(owner_uid: str | None = None):
     if firebase_store.enabled():
-        if not firebase_store.configured():
-            raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
-        try:
-            return firebase_store.call_with_timeout(lambda: firebase_store.list_predictions(owner_uid))
-        except Exception as exc:
-            raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
+        rows = _cached_firebase_history()
+        if owner_uid is not None:
+            rows = [row for row in rows if row.get("owner_uid") == owner_uid]
+        return rows
     with connection() as db:
         if owner_uid is None:
             rows=db.execute("SELECT payload FROM predictions ORDER BY id DESC")
@@ -535,6 +560,7 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
                 record=firebase_store.call_with_timeout(
                     lambda: firebase_store.create_prediction(owner_uid, record, normalized_bytes)
                 )
+                _invalidate_history_cache()
             except Exception:
                 persistence_warning="Prediction completed, but cloud history could not be saved. Try again later."
         if persistence_warning:
@@ -547,6 +573,7 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
             cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(owner_uid,record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
             record["id"]=cursor.lastrowid
             db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
+        _invalidate_history_cache()
         record.update({"saved":True,"feedback_available":True,"persistence_warning":None})
     return record
 
@@ -579,6 +606,7 @@ def feedback(request: Request, payload: dict = Body(...)):
     if firebase_store.enabled():
         try:
             item=firebase_store.submit_feedback(rec, confirmed_fabric, was_correct)
+            _invalidate_history_cache()
         except Exception as exc:
             raise HTTPException(503, "Could not store feedback securely.") from exc
         return {
@@ -608,6 +636,7 @@ def feedback(request: Request, payload: dict = Body(...)):
     }
     with connection() as db:
         db.execute("UPDATE predictions SET payload=? WHERE id=? AND owner_uid=?", (json.dumps(rec), pred_id, owner_uid))
+    _invalidate_history_cache()
 
     return {
         "status": "success",
@@ -673,6 +702,7 @@ def update_history_note(record_id:str, request: Request, payload:dict=Body(...))
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
         if not data: raise HTTPException(404,"Analysis not found")
+        _invalidate_history_cache()
         return data
     with connection() as db:
         row=db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?",(record_id,owner_uid)).fetchone()
@@ -680,6 +710,7 @@ def update_history_note(record_id:str, request: Request, payload:dict=Body(...))
         data=json.loads(row["payload"])
         data["note"]=new_note
         db.execute("UPDATE predictions SET payload=? WHERE id=? AND owner_uid=?",(json.dumps(data),record_id,owner_uid))
+    _invalidate_history_cache()
     return data
 
 @app.delete("/api/history/{record_id}")
@@ -690,9 +721,11 @@ def delete_history(record_id:str, request: Request):
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
         if not deleted: raise HTTPException(404,"Analysis not found")
+        _invalidate_history_cache()
         return {"deleted":True}
     with connection() as db:
         if not db.execute("DELETE FROM predictions WHERE id=? AND owner_uid=?",(record_id,request_uid(request))).rowcount: raise HTTPException(404,"Analysis not found")
+    _invalidate_history_cache()
     return {"deleted":True}
 
 @app.get("/api/history/export/csv")
@@ -731,10 +764,13 @@ def export_history_csv(request: Request):
 def clear_history(request: Request):
     if firebase_store.enabled():
         try:
-            return {"deleted":True,"count":firebase_store.clear_predictions(request_uid(request))}
+            count=firebase_store.clear_predictions(request_uid(request))
+            _invalidate_history_cache()
+            return {"deleted":True,"count":count}
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     with connection() as db: db.execute("DELETE FROM predictions WHERE owner_uid=?",(request_uid(request),))
+    _invalidate_history_cache()
     return {"deleted":True}
 
 @app.get("/api/analytics")

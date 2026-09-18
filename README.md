@@ -23,6 +23,18 @@ Open `http://localhost:5173`; API documentation is at `http://127.0.0.1:8000/doc
 
 Image validation → trained model (when supplied) → confidence + top-2 margin gate (`unknown` for low certainty) + explicit `non_fabric` class → documented fabric knowledge base → rule-based care and eco recommendations → history/analytics. Production can use Firebase Realtime Database and Firebase Storage through the backend; SQLite/local folders remain the development fallback.
 
+## Features
+
+- **Analyze** — upload/camera scan, pre-flight image quality checks, confidence + probability distribution, care profile (wash/dry/iron/detergent/bleach), stain guide, smart dosing, active-learning feedback.
+- **My Scans** — personal history with search, confidence filters, note editing, favorites, care reminders, CSV export, and a rule-based wash-load planner.
+- **Care Guide** — per-fabric spec sheets, comparison matrix, and an ISO 3758 care-symbol reference.
+- **Assistant** — optional bring-your-own-key fabric-care chat (any OpenAI-compatible endpoint; the key stays in the browser and goes only to the endpoint you choose).
+- **Model transparency** — live KPIs, dataset growth, confusion matrix, per-class metrics.
+- **Admin console** — compact 4-tab console: overview (4 KPIs + trends + recent activity), review queue (approve/reject user corrections), user management, model release. Requires a verified Firebase `admin` claim or the server-side `ADMIN_EMAILS` allowlist.
+- **°C/°F toggle and EN/ES/DE/FR interface language** for the customer UI.
+
+See `docs/IMPROVEMENT_PLAN.md` for the full research report, feature-gap analysis, and phased roadmap (including deliberately deferred model work: care-label OCR, stain detection, push notifications).
+
 Set `PERSISTENCE_BACKEND=firebase` together with the backend `FIREBASE_DATABASE_URL`, storage bucket, and service-account credential to enable durable cloud records. See `docs/18_firebase_persistence_setup.md` before switching it on.
 
 The current repository contains validated upload handling, a structured five-fabric knowledge base, API contract, responsive analysis interface, and honest model/metrics gates. Add the trained artifact at the configured `MODEL_PATH`, alongside a label-order and preprocessing manifest, before enabling inference.

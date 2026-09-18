@@ -4,25 +4,39 @@ import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
-import { MotionButton, MotionDiv, MotionPage, MotionPanel, MotionSection, Reveal, TextEffect } from "./motion-primitives";
+import { MotionButton, MotionDiv, MotionPage, MotionSection, Reveal, TextEffect } from "./motion-primitives";
+import {
+  API,
+  AUTH_SESSION_KEY,
+  NOTE_MAX_LENGTH,
+  apiFetch,
+  clearStoredToken,
+  convertTempText,
+  fetchWithTimeout,
+  readTempUnit,
+  writeStoredToken,
+  writeTempUnit,
+  withTimeout,
+  type Analytics,
+  type DatasetStats,
+  type FirebaseSettings,
+  type ImageAssessment,
+  type Prediction,
+  type SignedInUser,
+  type TempUnit,
+} from "./lib";
+import { PRESET_TAGS, STAIN_GUIDE } from "./data";
+import { LANGS, LangProvider, useI18n } from "./i18n";
+import AdminConsole from "./components/AdminConsole";
+import HomePage from "./components/HomePage";
+import LibraryPage from "./components/LibraryPage";
+import SiteFooter from "./components/SiteFooter";
+import PublicLanding from "./components/PublicLanding";
+import CareAssistant from "./components/CareAssistant";
+import CareSymbols from "./components/CareSymbols";
+import HistoryPage from "./components/HistoryPage";
 import "./style.css";
 
-// Vercel and Render are separate deployments. Keep the known production API
-// as a safe fallback so a missing Vercel variable cannot silently disable
-// backend token verification or administrator access.
-const configuredApi = import.meta.env.VITE_API_URL?.trim().replace(/\/$/, "");
-const API = configuredApi || (window.location.hostname.endsWith("vercel.app")
-  ? "https://ai-laundry-assistant.onrender.com/api"
-  : "/api");
-const NOTE_MAX_LENGTH = 240;
-const AUTH_SESSION_KEY = "laundryai_explicit_auth_session";
-const TOKEN_STORAGE_KEY = "laundryai_firebase_token";
-// Firebase ID tokens live for one hour. Treat a token as unusable slightly
-// before that so a request never leaves with a token that expires mid-flight.
-const TOKEN_EXPIRY_SLACK_MS = 60_000;
-
-type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean; is_admin?: boolean };
-type FirebaseSettings = { enabled: boolean; firebase_config: Record<string, string> | null };
 const firebaseWebConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "",
@@ -35,100 +49,8 @@ const firebaseWebConfig = {
 const firebaseWebConfigured = Boolean(firebaseWebConfig.apiKey && firebaseWebConfig.authDomain && firebaseWebConfig.projectId && firebaseWebConfig.appId);
 const backendAuthAvailable = Boolean(API);
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then(
-      (value) => { window.clearTimeout(timer); resolve(value); },
-      (error) => { window.clearTimeout(timer); reject(error); },
-    );
-  });
-}
-
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number): Promise<Response> {
-  return withTimeout(fetch(input, init), timeoutMs, "The authentication service timed out.");
-}
-
-function tokenExpiry(token: string): number {
-  try {
-    const payload = token.split(".")[1];
-    if (!payload) return 0;
-    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-    return typeof claims?.exp === "number" ? claims.exp * 1000 : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function writeStoredToken(token: string) {
-  const stored = { token, expires_at: tokenExpiry(token) };
-  try {
-    localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(stored));
-  } catch {
-    // Private browsing can refuse storage; the in-memory Firebase session still works.
-  }
-}
-
-function readStoredToken(): string | null {
-  let raw: string | null = null;
-  try {
-    raw = localStorage.getItem(TOKEN_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-  if (!raw) return null;
-  const usableAfter = Date.now() + TOKEN_EXPIRY_SLACK_MS;
-  try {
-    const stored = JSON.parse(raw) as { token?: string; expires_at?: number };
-    return stored?.token && (stored.expires_at || 0) > usableAfter ? stored.token : null;
-  } catch {
-    // A token stored by an earlier build was written as a bare string.
-    return tokenExpiry(raw) > usableAfter ? raw : null;
-  }
-}
-
-function clearStoredToken() {
-  try {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-  } catch {
-    // Nothing to clear when storage is unavailable.
-  }
-}
-
-// The stored token is only a fallback: whenever the SDK still holds the
-// signed-in user we ask it for a current token, so the app never calls the API
-// with a token that is missing, stale, or already expired.
-async function currentIdToken(forceRefresh = false): Promise<string | null> {
-  const firebaseUser = getApps().length ? getAuth(getApp()).currentUser : null;
-  if (firebaseUser) {
-    try {
-      const token = await withTimeout(firebaseUser.getIdToken(forceRefresh), 8_000, "Firebase token retrieval timed out.");
-      writeStoredToken(token);
-      return token;
-    } catch (error) {
-      console.warn("Firebase token retrieval:", error);
-    }
-  }
-  return forceRefresh ? null : readStoredToken();
-}
-
-async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}, retry = true): Promise<Response> {
-  const token = await currentIdToken();
-  const send = (value: string | null) => {
-    const headers = new Headers(init.headers);
-    if (value) headers.set("Authorization", `Bearer ${value}`);
-    return fetch(input, { ...init, headers });
-  };
-  const response = await send(token);
-  if (response.status === 401 && retry) {
-    // The session may have expired mid-use: force one refresh, then retry once.
-    const refreshed = await currentIdToken(true).catch(() => null);
-    if (refreshed && refreshed !== token) return send(refreshed);
-  }
-  return response;
-}
-
 function AuthGate() {
+  const { t } = useI18n();
   const [user, setUser] = useState<SignedInUser | null>(null);
   const [settings, setSettings] = useState<FirebaseSettings | null>(firebaseWebConfigured ? { enabled: true, firebase_config: firebaseWebConfig } : null);
   const [authError, setAuthError] = useState("");
@@ -138,6 +60,7 @@ function AuthGate() {
   const [isRegistering, setIsRegistering] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
   const [verificationPending, setVerificationPending] = useState(false);
+  const [authMode, setAuthMode] = useState<"landing" | "login">("landing");
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -324,27 +247,32 @@ function AuthGate() {
   };
 
   if (user) return <App user={user} onSignOut={handleSignOut} />;
-  return (
+
+  if (authMode === "login") {
+    return (
     <main className="login-shell">
       <Reveal className="login-panel" aria-labelledby="login-title">
+        <button type="button" className="login-back" onClick={() => setAuthMode("landing")}>
+          ← {t("login.back")}
+        </button>
         <div className="login-brand"><div className="login-mark">🧺</div><span>Laundry<span>AI</span></span></div>
-        <p className="login-eyebrow">FABRIC CARE INTELLIGENCE</p>
-        <h1 id="login-title"><TextEffect>Welcome back</TextEffect></h1>
-        <p className="login-copy">Sign in to analyze garments and access your personalized fabric-care guidance.</p>
+        <p className="login-eyebrow">{t("login.eyebrow")}</p>
+        <h1 id="login-title"><TextEffect>{t("login.title")}</TextEffect></h1>
+        <p className="login-copy">{t("login.copy")}</p>
         {settings === null ? <div className="login-loading">Connecting to secure sign-in…</div> : (
           <>
             <form className={`email-login ${settings.enabled ? "" : "credentials-disabled"}`} onSubmit={handleEmailLogin}>
               <label>Email<input type="email" autoComplete="email" required disabled={!settings.enabled} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
               <label>Password<input type="password" autoComplete={isRegistering ? "new-password" : "current-password"} minLength={6} required disabled={!settings.enabled} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" /></label>
-              {!isRegistering && <button className="forgot-password" type="button" onClick={handlePasswordReset} disabled={!settings.enabled || isSigningIn}>Forgot password?</button>}
-              <button className="email-login-submit" disabled={!settings.enabled || isSigningIn}>{isSigningIn ? "Please wait…" : isRegistering ? "CREATE ACCOUNT" : "LOGIN"}</button>
+              {!isRegistering && <button className="forgot-password" type="button" onClick={handlePasswordReset} disabled={!settings.enabled || isSigningIn}>{t("login.forgot")}</button>}
+              <button className="email-login-submit" disabled={!settings.enabled || isSigningIn}>{isSigningIn ? "…" : isRegistering ? t("login.register") : t("login.login")}</button>
             </form>
             {settings.enabled ? <>
-              <button className="auth-switch" type="button" onClick={() => setIsRegistering((value) => !value)}>{isRegistering ? "Already have an account? Sign in" : "New here? Create an account"}</button>
+              <button className="auth-switch" type="button" onClick={() => setIsRegistering((value) => !value)}>{isRegistering ? t("login.have") : t("login.new")}</button>
               {verificationPending && <button className="auth-switch verification-link" type="button" onClick={handleResendVerification}>Resend verification email</button>}
               <div className="auth-divider"><span>or</span></div>
               <MotionButton whileHover={{ y: -2 }} whileTap={{ scale: .985 }} className="google-login" onClick={handleGoogleLogin} disabled={isSigningIn}>
-                <span className="google-g">G</span>Continue with Google
+                <span className="google-g">G</span>{t("login.google")}
               </MotionButton>
             </> : <>
               <div className="auth-setup"><strong>Firebase setup pending</strong><br />Email, password and Google sign-in will activate after deployment.</div>
@@ -354,7 +282,7 @@ function AuthGate() {
         )}
         {authNotice && <p className="login-notice" role="status">{authNotice}</p>}
         {authError && <p className="login-error" role="alert">{authError}</p>}
-        <small>Care labels always remain the final authority.</small>
+        <small>{t("login.footnote")}</small>
       </Reveal>
       <Reveal className="login-aside" as="aside" delay={.08}>
         <MotionDiv className="login-aside-orb orb-one" animate={{ scale: [1, 1.035, 1], rotate: [0, 2, 0] }} transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }} /><MotionDiv className="login-aside-orb orb-two" animate={{ scale: [1.02, 1, 1.02], rotate: [0, -3, 0] }} transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }} /><MotionDiv className="login-aside-orb orb-three" animate={{ y: [0, -13, 0] }} transition={{ duration: 4.5, repeat: Infinity, ease: "easeInOut" }} />
@@ -364,305 +292,15 @@ function AuthGate() {
         <div className="login-aside-footer"><span className="live-dot" /> Secure authentication · AI-assisted guidance</div>
       </Reveal>
     </main>
-  );
+    );
+  }
+
+  // First-time visitors browse the platform freely; the login screen only
+  // appears when they choose to sign in.
+  return <PublicLanding onSignIn={() => setAuthMode("login")} />;
 }
 
-type Page = "home" | "analyze" | "insights" | "library" | "admin" | "about";
-
-type Recommendation = {
-  wash: { temperature: string; cycle: string; detergent?: string; spin?: string };
-  dry: string;
-  iron: string;
-  bleach: string;
-  explanation: string;
-  eco: string[];
-};
-
-type Alternative = {
-  fabric: string;
-  confidence: number;
-};
-
-type Prediction = {
-  id: number | string;
-  created_at: string;
-  fabric: string;
-  confidence: number;
-  note: string | null;
-  image_token?: string | null;
-  persistence_warning?: string | null;
-  saved?: boolean;
-  user_feedback?: any;
-  owner_uid?: string | null;
-  alternatives?: Alternative[];
-  quality?: {
-    width?: number;
-    height?: number;
-    brightness?: number;
-    texture?: number;
-    warning?: boolean;
-  };
-  recommendation: Recommendation | null;
-  preview: boolean;
-  model_decision?: {
-    accepted: boolean;
-    detected_non_fabric: boolean;
-    reason?: string | null;
-    top_fabric?: string;
-    top_confidence?: number;
-    top2_margin?: number;
-    thresholds?: {
-      min_confidence?: number;
-      min_margin?: number;
-    };
-  };
-};
-
-type AdminFeedbackItem = {
-  id?: string;
-  fabric: string;
-  file: string;
-  filename?: string;
-  original_fabric?: string;
-  created_at?: string;
-};
-
-type AdminUser = {
-  uid: string;
-  email?: string;
-  name?: string;
-  picture?: string;
-  email_verified: boolean;
-  disabled: boolean;
-  is_admin: boolean;
-  providers: string[];
-  created_at?: number;
-  last_sign_in_at?: number;
-};
-
-type AdminAuditEntry = {
-  id?: string;
-  action?: string;
-  actor?: string;
-  created_at?: string | number;
-  detail?: string;
-};
-
-type AdminHealth = {
-  status?: string;
-  model_ready?: boolean;
-  [key: string]: unknown;
-};
-
-function AdminFeedbackPreview({ item }: { item: AdminFeedbackItem }) {
-  const [source, setSource] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let objectUrl: string | null = null;
-    let active = true;
-    void apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/image`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Preview unavailable");
-        objectUrl = URL.createObjectURL(await response.blob());
-        if (active) setSource(objectUrl);
-      })
-      .catch(() => { if (active) setFailed(true); });
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [item.fabric, item.file]);
-  if (failed) return <div className="admin-preview-placeholder">Preview unavailable</div>;
-  if (!source) return <div className="admin-preview-placeholder">Loading image…</div>;
-  return <img className="admin-feedback-preview" src={source} alt={`Submitted ${item.fabric} feedback`} />;
-}
-
-type Analytics = {
-  garments_analyzed: number;
-  average_confidence: number | null;
-  most_detected_fabric: string | null;
-  eco_recommendations: number;
-  distribution?: Record<string, number>;
-};
-
-type DatasetStats = {
-  total_samples: number;
-  user_contributed: number;
-  classes: Record<string, { total: number; user_verified: number }>;
-};
-
-type ImageAssessment = {
-  width: number;
-  height: number;
-  resolutionStatus: "Optimal" | "Low";
-  brightness: number;
-  brightnessStatus: "Optimal" | "Too Dark" | "Too Bright";
-  isReady: boolean;
-};
-
-const PRESET_TAGS = [
-  "100% Cotton",
-  "Cold wash only",
-  "Delicate wool / silk",
-  "Has stubborn stain",
-  "Hand wash recommended",
-  "Do not tumble dry"
-];
-
-const FABRICS_DATA: Record<string, {
-  name: string;
-  emoji: string;
-  category: string;
-  overview: string;
-  visual: string;
-  washTemp: string;
-  cycle: string;
-  dry: string;
-  iron: string;
-  shrinkRisk: string;
-  heatSens: string;
-  sustainability: string;
-}> = {
-  cotton: {
-    name: "Cotton",
-    emoji: "🌱",
-    category: "Natural Plant Fiber",
-    overview: "Cellulose fiber known for high absorbency, breathability, and durability. Ideal for daily casual garments.",
-    visual: "Matte surface, visible plain or twill weave structure, soft natural fiber texture with minimal sheen.",
-    washTemp: "30°C – 40°C",
-    cycle: "Normal or gentle",
-    dry: "Air dry where practical; low tumble dry",
-    iron: "Medium heat (steam optional)",
-    shrinkRisk: "Medium",
-    heatSens: "Medium",
-    sustainability: "Cold water washing extends cotton garment lifespan and reduces laundering carbon footprint."
-  },
-  polyester: {
-    name: "Polyester",
-    emoji: "🧶",
-    category: "Synthetic Polymer",
-    overview: "Petroleum-based synthetic textile prized for wrinkle resistance, quick drying, and tensile strength.",
-    visual: "Smooth or micro-textured surface, subtle synthetic luster, uniform thread structure with crisp folds.",
-    washTemp: "30°C max",
-    cycle: "Gentle / Synthetic",
-    dry: "Air dry or low heat dryer",
-    iron: "Low heat with pressing cloth",
-    shrinkRisk: "Low",
-    heatSens: "High (melts at high temps)",
-    sustainability: "Synthetic microfibers shed during hot vigorous cycles; wash cold in full loads."
-  },
-  denim: {
-    name: "Denim",
-    emoji: "👖",
-    category: "Heavy Twill Cotton",
-    overview: "Rugged warp-faced cotton twill with characteristic indigo dye on the warp and white weft threads.",
-    visual: "Distinct diagonal twill lines (2/1 or 3/1 weave), rich indigo color variation, textured surface relief.",
-    washTemp: "Cold (30°C max)",
-    cycle: "Gentle, inside-out",
-    dry: "Air dry in shade; avoid high dryer heat",
-    iron: "Medium heat while slightly damp",
-    shrinkRisk: "Medium",
-    heatSens: "Medium",
-    sustainability: "Denim requires less frequent washing. Spot clean and air out to preserve indigo color and save water."
-  },
-  wool: {
-    name: "Wool",
-    emoji: "🐑",
-    category: "Natural Protein Fiber",
-    overview: "Animal protein fiber with microscopic scales providing natural crimp, thermal insulation, and resilience.",
-    visual: "Fuzzy, fibrous surface, soft textured hand, looped knit or woven texture without harsh sheen.",
-    washTemp: "Cold (30°C max)",
-    cycle: "Wool / Hand-wash only",
-    dry: "Dry flat, reshape damp; never tumble dry",
-    iron: "Low heat with damp pressing cloth",
-    shrinkRisk: "High (felting risk)",
-    heatSens: "High",
-    sustainability: "Wool naturally resists odor. Air out regularly and wash only when visibly soiled."
-  },
-  silk: {
-    name: "Silk",
-    emoji: "🪡",
-    category: "Natural Protein Filament",
-    overview: "Continuous protein filament produced by silkworms, celebrated for luxurious drape, luster, and smooth hand.",
-    visual: "Subtle pearlescent sheen, fine thread diameter, smooth fluid drape, delicate weave pattern.",
-    washTemp: "Cold water",
-    cycle: "Hand-wash / Ultra delicate",
-    dry: "Air dry away from direct sunlight",
-    iron: "Low heat, inside out",
-    shrinkRisk: "Medium",
-    heatSens: "High",
-    sustainability: "Delicate filament structure requires pH-neutral gentle detergents to maintain tensile integrity."
-  }
-};
-
-const STAIN_GUIDE: Record<string, { label: string; icon: string; fabrics: Record<string, { steps: string[]; avoid: string; optimalTemp: string }> }> = {
-  coffee: {
-    label: "Coffee / Tea",
-    icon: "☕",
-    fabrics: {
-      cotton: { steps: ["Blot excess liquid with a clean white cloth (do not rub).", "Flush from the reverse side with cold running water.", "Apply liquid detergent or baking soda paste directly to the spot; let sit 10 min.", "Machine wash at 30°C–40°C with an oxygen-safe booster if needed."], avoid: "Avoid hot water before treating as heat permanently sets tannin stains.", optimalTemp: "Cold to 30°C" },
-      polyester: { steps: ["Dab with a sponge dampened in cold water and a drop of dish soap.", "Gently work solution into synthetic fibers.", "Rinse thoroughly and wash in normal 30°C synthetic cycle."], avoid: "Do not machine dry until stain is fully removed.", optimalTemp: "30°C Max" },
-      denim: { steps: ["Blot with damp sponge and mild liquid detergent.", "Rinse with cold water from the inside of the garment.", "Wash inside-out in cold gentle cycle."], avoid: "Vigorous scrubbing that abrades indigo surface dye.", optimalTemp: "Cold (20°C–30°C)" },
-      wool: { steps: ["Blot immediately with clean paper towel without rubbing.", "Mix 1 part white vinegar with 2 parts cold water; dab gently.", "Rinse with cold water and dry flat."], avoid: "Never use enzyme detergents, ammonia, or hot water on natural wool scales.", optimalTemp: "Cold (< 30°C)" },
-      silk: { steps: ["Blot gently with a sponge soaked in cool water.", "Apply 1 drop of pH-neutral silk wash to a damp cloth and dab lightly.", "Flush with cold water and blot between towels."], avoid: "Never wring, twist, or use oxygen/chlorine bleach on delicate silk filaments.", optimalTemp: "Cold only" }
-    }
-  },
-  oil: {
-    label: "Oil & Grease",
-    icon: "🍳",
-    fabrics: {
-      cotton: { steps: ["Cover grease spot generously with cornstarch or baking soda for 15 min to absorb oil.", "Brush off powder; apply concentrated clear dish soap directly to stain.", "Rub gently and wash in 40°C warm cycle."], avoid: "Never tumble dry before checking stain is 100% gone.", optimalTemp: "30°C–40°C" },
-      polyester: { steps: ["Apply grease-cutting dish soap or liquid sports detergent directly onto synthetic fibers.", "Work into fibers using fingertips; let rest for 15 minutes.", "Wash in warm water (30°C) with standard detergent."], avoid: "Synthetic fibers bond quickly to oils; avoid high dryer heat.", optimalTemp: "30°C" },
-      denim: { steps: ["Sprinkle baking soda over grease spot to absorb surface lipids.", "Pre-treat with diluted dish soap and lukewarm water.", "Machine wash cold inside out."], avoid: "Hot water cycles that fade dark denim washes.", optimalTemp: "Cold" },
-      wool: { steps: ["Sprinkle talcum powder or cornstarch to absorb grease; let sit 30 min.", "Brush off gently with a soft-bristle garment brush.", "Spot-dab with wool-safe pH-neutral detergent and cold water."], avoid: "Never apply heavy chemical degreasers or hot water.", optimalTemp: "Cold" },
-      silk: { steps: ["Immediately sprinkle with cornstarch; leave for 20 minutes to lift oil.", "Gently brush off powder without pressing.", "For persistent grease, use specialist silk dry-cleaning."], avoid: "Never rub oil deeper into fine silk weaves; avoid heavy soaps.", optimalTemp: "Cold" }
-    }
-  },
-  wine: {
-    label: "Red Wine",
-    icon: "🍷",
-    fabrics: {
-      cotton: { steps: ["Blot excess wine with a dry cloth immediately.", "Flush with cold water or club soda to lift anthocyanin pigments.", "Pre-treat with liquid detergent or hydrogen peroxide on whites.", "Wash in normal 30°C–40°C cycle."], avoid: "Hot water sets red wine tannins permanently.", optimalTemp: "Cold" },
-      polyester: { steps: ["Flush immediately with cold running water.", "Dab with liquid detergent mixed with a splash of white vinegar.", "Wash at 30°C in gentle cycle."], avoid: "Hot ironing before checking stain residue.", optimalTemp: "Cold / 30°C" },
-      denim: { steps: ["Blot gently with a cold water-dampened sponge.", "Dab with mild liquid soap and flush with cold water.", "Air dry in shade."], avoid: "Chlorine bleach which ruins denim indigo dye.", optimalTemp: "Cold" },
-      wool: { steps: ["Blot gently with a clean cloth.", "Dab with diluted white vinegar (1 part vinegar to 3 parts cold water).", "Rinse with cold water and reshape damp."], avoid: "Never use sodium percarbonate or bleach on wool.", optimalTemp: "Cold" },
-      silk: { steps: ["Blot immediately without spreading stain radius.", "Dab with cold water mixed with 1 tsp cosmetic glycerin.", "Rinse with cold water and lay flat to dry."], avoid: "Bleach and alkaline detergents will dissolve silk protein bonds.", optimalTemp: "Cold only" }
-    }
-  },
-  blood: {
-    label: "Blood / Protein",
-    icon: "🩸",
-    fabrics: {
-      cotton: { steps: ["Flush instantly with cold running water from back of fabric (never warm).", "Pre-soak in cold saline solution or apply 3% hydrogen peroxide on white cotton.", "Wash in cold gentle cycle."], avoid: "Warm or hot water coagulates blood proteins into fiber pores.", optimalTemp: "Cold only" },
-      polyester: { steps: ["Rinse with cold running water.", "Pre-treat with enzymatic liquid detergent; let sit 10 min.", "Wash at 30°C max."], avoid: "Hot water pre-soak.", optimalTemp: "Cold" },
-      denim: { steps: ["Flush thoroughly with cold water from behind the weave.", "Apply a paste of cold water and baking soda.", "Wash cold with mild detergent."], avoid: "Any heat until stain is completely gone.", optimalTemp: "Cold" },
-      wool: { steps: ["Flush immediately with cold running water.", "Dab with cold saline solution (1 tsp salt in 1 cup cold water).", "Rinse with cold water and air dry flat."], avoid: "Hot water, alkaline soaps, and chlorine.", optimalTemp: "Cold only" },
-      silk: { steps: ["Blot with cold water-dampened cotton pad.", "Dab with gentle cold soapy water (pH 7).", "Rinse cold."], avoid: "Hot water and aggressive scrubbing.", optimalTemp: "Cold only" }
-    }
-  },
-  ink: {
-    label: "Ink & Marker",
-    icon: "🖋️",
-    fabrics: {
-      cotton: { steps: ["Place paper towel under the stain.", "Dab with isopropyl rubbing alcohol using a cotton swab.", "Rinse with cold water and wash normally at 30°C."], avoid: "Rubbing vigorously which spreads the pigment halo.", optimalTemp: "30°C" },
-      polyester: { steps: ["Apply rubbing alcohol or hand sanitizer to ink spot.", "Blot until ink pigment transfers to paper towel.", "Wash at 30°C."], avoid: "High-temperature dryer heat.", optimalTemp: "30°C" },
-      denim: { steps: ["Dab with alcohol-dampened cloth.", "Rinse with cold water.", "Wash cold inside out."], avoid: "Bleaching agents.", optimalTemp: "Cold" },
-      wool: { steps: ["Lightly dab with rubbing alcohol on a cotton ball.", "Blot with damp cold cloth.", "Wash with wool detergent."], avoid: "Soaking entire wool garment in alcohol.", optimalTemp: "Cold" },
-      silk: { steps: ["Lightly dab with dilute rubbing alcohol on a cotton swab.", "Blot gently without pressure.", "Consult professional dry cleaner if stubborn."], avoid: "Heavy chemical solvents on delicate silk filaments.", optimalTemp: "Cold" }
-    }
-  },
-  sweat: {
-    label: "Sweat & Deodorant",
-    icon: "🏃",
-    fabrics: {
-      cotton: { steps: ["Pre-soak in 1:1 warm water and white vinegar for 20 min.", "Apply baking soda paste to underarms.", "Wash at 40°C with oxygen booster."], avoid: "Chlorine bleach which reacts with sweat minerals turning yellow.", optimalTemp: "40°C" },
-      polyester: { steps: ["Soak in white vinegar solution (1 cup vinegar in warm water sink).", "Pre-treat with sport/synthetic detergent.", "Wash at 30°C."], avoid: "Fabric softeners which trap body odors in synthetic fibers.", optimalTemp: "30°C" },
-      denim: { steps: ["Turn inside out and air in sunlight or soak in cold vinegar water.", "Wash cold."], avoid: "Frequent aggressive washing; spot treat and air out.", optimalTemp: "Cold" },
-      wool: { steps: ["Air out garment overnight (wool naturally neutralizes sweat odor).", "If needed, spot clean with cold dilute vinegar."], avoid: "Never machine tumble or use alkaline detergents.", optimalTemp: "Cold" },
-      silk: { steps: ["Dab underarms with 1:1 cold water and white vinegar.", "Rinse thoroughly with cold water.", "Hand wash in cool water with silk shampoo."], avoid: "Never use strong alkaline soaps or hot water.", optimalTemp: "Cold" }
-    }
-  }
-};
+type Page = "home" | "analyze" | "insights" | "library" | "history" | "assistant" | "admin" | "about";
 
 function ConfusionMatrixView({ metrics }: { metrics: any }) {
   if (!metrics?.confusion_matrix || !metrics?.per_class_metrics) {
@@ -776,6 +414,10 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const reduceMotion = useReducedMotion();
   const [page, setPage] = useState<Page>("home");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const { t, lang, setLang } = useI18n();
+  const [tempUnit, setTempUnit] = useState<TempUnit>(readTempUnit);
+  const [langOpen, setLangOpen] = useState(false);
+  const changeTempUnit = (unit: TempUnit) => { setTempUnit(unit); writeTempUnit(unit); };
   const [file, setFile] = useState<File | undefined>();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -789,25 +431,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [analytics, setAnalytics] = useState<Analytics | undefined>();
   const [datasetStats, setDatasetStats] = useState<DatasetStats | undefined>();
   const [modelMetrics, setModelMetrics] = useState<any>(null);
-  const [adminOverview, setAdminOverview] = useState<any>(null);
-  const [adminFeedback, setAdminFeedback] = useState<AdminFeedbackItem[]>([]);
-  const [adminScans, setAdminScans] = useState<any[]>([]);
-  const [reviewSubtab, setReviewSubtab] = useState<"pending" | "scans">("pending");
-  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
-  const [adminAudit, setAdminAudit] = useState<AdminAuditEntry[]>([]);
-  const [adminHealth, setAdminHealth] = useState<AdminHealth | null>(null);
-  const [adminMessage, setAdminMessage] = useState("");
-  const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
-  const [adminPanelLoading, setAdminPanelLoading] = useState<Record<string, boolean>>({});
-  const [reviewQuery, setReviewQuery] = useState("");
-  const [reviewFilter, setReviewFilter] = useState<"all" | "corrected" | "confirmed">("all");
-  const [userQuery, setUserQuery] = useState("");
-  const [adminLoading, setAdminLoading] = useState(false);
-  const [adminTab, setAdminTab] = useState<"operations" | "overview" | "review" | "feedback" | "users" | "model" | "reference">("operations");
-  const [adminRefreshKey, setAdminRefreshKey] = useState(0);
-  const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
-  const [compareActive, setCompareActive] = useState(false);
   const [stream, setStream] = useState<MediaStream | undefined>();
   const [cameraFacing, setCameraFacing] = useState<"user" | "environment">("environment");
   const [note, setNote] = useState("");
@@ -869,71 +493,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     void load();
   }, []);
 
-  useEffect(() => {
-    if (!user.is_admin) return;
-    let timer: number | undefined;
-    const refreshAdminOverview = async () => {
-      setAdminLoading(true);
-      setAdminMessage("");
-      setAdminPanelLoading({ overview: true, feedback: true, scans: true, users: true, audit: true, health: true });
-      const [healthResponse, overviewResponse, feedbackResponse, usersResponse, scansResponse, auditResponse] = await Promise.all([
-        fetch(`${API}/health`, { cache: "no-store" }).catch(() => null),
-        apiFetch(`${API}/admin/overview`).catch(() => null),
-        apiFetch(`${API}/admin/feedback`).catch(() => null),
-        apiFetch(`${API}/admin/users`).catch(() => null),
-        apiFetch(`${API}/admin/scans`).catch(() => null),
-        apiFetch(`${API}/admin/audit-log`).catch(() => null),
-      ]);
-      const nextErrors: Record<string, string> = {};
-      if (healthResponse?.ok) setAdminHealth(await healthResponse.json());
-      else nextErrors.health = "Health endpoint unavailable.";
-      if (overviewResponse && overviewResponse.ok) {
-        const overview = await overviewResponse.json();
-        setAdminOverview(overview);
-        setAdminMessage((overview.warnings || []).join(" "));
-      } else {
-        const failure = overviewResponse ? await overviewResponse.json().catch(() => ({})) : {};
-        nextErrors.overview = failure.detail || (overviewResponse ? `Operations API returned ${overviewResponse.status}.` : "Operations API unreachable.");
-      }
-      if (feedbackResponse && feedbackResponse.ok) {
-        setAdminFeedback((await feedbackResponse.json()).items || []);
-      } else {
-        const failure = feedbackResponse ? await feedbackResponse.json().catch(() => ({})) : {};
-        nextErrors.feedback = failure.detail || "Feedback review queue temporarily unavailable.";
-      }
-      if (usersResponse && usersResponse.ok) {
-        setAdminUsers((await usersResponse.json()).users || []);
-      } else {
-        const failure = usersResponse ? await usersResponse.json().catch(() => ({})) : {};
-        nextErrors.users = failure.detail || "User directory temporarily unavailable.";
-      }
-      if (scansResponse && scansResponse.ok) {
-        setAdminScans((await scansResponse.json()).items || []);
-      } else {
-        const failure = scansResponse ? await scansResponse.json().catch(() => ({})) : {};
-        nextErrors.scans = failure.detail || "Scan history temporarily unavailable.";
-      }
-      if (auditResponse && auditResponse.ok) {
-        const audit = await auditResponse.json();
-        setAdminAudit(audit.items || audit.events || []);
-      } else if (auditResponse?.status !== 404) {
-        nextErrors.audit = "Audit history temporarily unavailable.";
-      }
-      setAdminErrors(nextErrors);
-      setAdminPanelLoading({});
-      setAdminLastUpdated(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-      setAdminLoading(false);
-    };
-    void refreshAdminOverview().catch(() => {
-      setAdminLoading(false);
-      setAdminPanelLoading({});
-    });
-    // Conditional loop: it polls only while the model-training job is active.
-    if (adminOverview?.retraining?.status === "running") {
-      timer = window.setInterval(() => void refreshAdminOverview().catch(() => undefined), 5000);
-    }
-    return () => { if (timer) window.clearInterval(timer); };
-  }, [user.is_admin, adminOverview?.retraining?.status, adminRefreshKey]);
 
   useEffect(() => {
     if (stream && video.current) {
@@ -1275,28 +834,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     </button>
   );
 
-  const normalizedReviewQuery = reviewQuery.trim().toLowerCase();
-  const filteredFeedback = adminFeedback.filter((item) =>
-    !normalizedReviewQuery || [item.fabric, item.original_fabric, item.filename, item.file].some((value) => String(value || "").toLowerCase().includes(normalizedReviewQuery))
-  );
-  const filteredScans = adminScans.filter((scan) => {
-    const matchesQuery = !normalizedReviewQuery || [scan.fabric, scan.note, scan.owner_uid, scan.id].some((value) => String(value || "").toLowerCase().includes(normalizedReviewQuery));
-    const corrected = Boolean(scan.user_feedback && !scan.user_feedback.was_correct);
-    const confirmed = Boolean(scan.user_feedback?.was_correct);
-    return matchesQuery && (reviewFilter === "all" || (reviewFilter === "corrected" && corrected) || (reviewFilter === "confirmed" && confirmed));
-  });
-  const filteredUsers = adminUsers.filter((account) =>
-    !userQuery.trim() || [account.name, account.email, account.uid].some((value) => String(value || "").toLowerCase().includes(userQuery.trim().toLowerCase()))
-  );
-  const trendDays = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-    const key = date.toISOString().slice(0, 10);
-    return { key, label: date.toLocaleDateString([], { weekday: "short" }), count: adminScans.filter((scan) => String(scan.created_at || "").slice(0, 10) === key).length };
-  });
-  const trendMax = Math.max(1, ...trendDays.map((day) => day.count));
-
   return (
     <>
       {sessionExpired && (
@@ -1320,15 +857,38 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         </button>
 
         <nav className={`main-nav ${mobileNavOpen ? "open" : ""}`}>
-          {nav("home", "Home")}
-          {nav("analyze", "Analyze")}
-          {nav("insights", "Model")}
-          {nav("library", "Care Guide")}
-          {user.is_admin && nav("admin", "Admin")}
+          {nav("home", t("nav.home"))}
+          {nav("analyze", t("nav.analyze"))}
+          {nav("insights", t("nav.model"))}
+          {nav("library", t("nav.library"))}
+          {nav("history", t("nav.history"))}
+          {nav("assistant", t("nav.assistant"))}
+          {user.is_admin && nav("admin", t("nav.admin"))}
         </nav>
 
+        <div className="header-tools">
+          <div className="temp-toggle" role="group" aria-label="Temperature unit">
+            <button type="button" className={tempUnit === "C" ? "active" : ""} onClick={() => changeTempUnit("C")} title="Celsius">°C</button>
+            <button type="button" className={tempUnit === "F" ? "active" : ""} onClick={() => changeTempUnit("F")} title="Fahrenheit">°F</button>
+          </div>
+          <div className="lang-switch">
+            <button type="button" onClick={() => setLangOpen((value) => !value)} aria-haspopup="listbox" aria-expanded={langOpen}>
+              🌐 {lang.toUpperCase()}
+            </button>
+            {langOpen && (
+              <div className="lang-menu" role="listbox" aria-label="Language">
+                {LANGS.map((option) => (
+                  <button key={option.code} type="button" role="option" aria-selected={lang === option.code} className={lang === option.code ? "active" : ""} onClick={() => { setLang(option.code); setLangOpen(false); }}>
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
         <button className="header-cta" onClick={() => setPage("analyze")}>
-          <span>+</span> Analyze Garment
+          <span>+</span> {t("cta.analyze")}
         </button>
         <button className="account-chip" type="button" onClick={() => void onSignOut()} title="Sign out">
           {user.picture ? <img src={user.picture} alt="" referrerPolicy="no-referrer" /> : <span>{user.name.charAt(0).toUpperCase()}</span>}
@@ -1340,184 +900,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           HOME PAGE
           ======================================================== */}
       {page === "home" && (
-        <MotionPage className="page-container">
-          {/* Hero Section */}
-          <section className="hero-grid">
-            <Reveal className="hero-left">
-              <span className="eyebrow">COMPUTER VISION × TEXTILE SCIENCE</span>
-              <h1>
-                <TextEffect>See the Fabric.</TextEffect> <br />
-                <span className="serif">Understand the Care.</span>
-              </h1>
-              <p className="lead">
-                AI-powered fabric intelligence that analyzes garment images, estimates the most likely fabric class, and recommends safer, smarter, and more sustainable care.
-              </p>
-              <div className="hero-actions">
-                <MotionButton whileHover={{ y: -3 }} whileTap={{ scale: .98 }} className="btn btn-primary" onClick={() => setPage("analyze")}>
-                  Analyze a Garment →
-                </MotionButton>
-                <button className="btn btn-secondary" onClick={() => setPage("library")}>
-                  Explore Fabric Library
-                </button>
-              </div>
-              <div className="trust-badge">
-                <span>🛡️ Computer vision assisted</span>
-                <span>•</span>
-                <span>Evidence-led</span>
-                <span>•</span>
-                <span>Care labels authoritative</span>
-              </div>
-            </Reveal>
-
-            {/* Right Interactive Scanner Simulation */}
-            <Reveal className="hero-right" delay={.12}>
-              <div className="scanner-card">
-                <div className="scanner-viewbox">
-                  <div className="macro-fabric-bg">
-                    <div className="fabric-grid-overlay"></div>
-                    <div className="laser-scan-line"></div>
-                    <div className="scan-target-box">🌱</div>
-                  </div>
-                </div>
-                <div className="scanner-footer">
-                  <div className="scanner-pill">
-                    <span className="dot"></span>
-                    <span>AI Vision: <b>Cotton (94.2%)</b></span>
-                  </div>
-                  <span style={{ fontSize: "12px", color: "var(--sage)" }}>Quality: Verified</span>
-                </div>
-              </div>
-            </Reveal>
-          </section>
-
-          {/* 5-Step Pipeline Section */}
-          <section className="pipeline-section">
-            <div className="section-header">
-              <span className="eyebrow">METHODOLOGY PIPELINE</span>
-              <h2>How LaundryAI Works</h2>
-              <p>A transparent 5-stage computer vision and expert rule system from raw image to sustainable care.</p>
-            </div>
-            <div className="pipeline-grid">
-              <div className="pipeline-step">
-                <div className="step-num">01 / INPUT</div>
-                <div className="step-title">Capture</div>
-                <div className="step-desc">Upload or photograph garment with automatic resolution and lighting pre-checks.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">02 / VISION</div>
-                <div className="step-title">Feature Extract</div>
-                <div className="step-desc">CNN layers analyze surface macro-texture, weave pattern, and optical luster.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">03 / CLASSIFY</div>
-                <div className="step-title">Inference & Gate</div>
-                <div className="step-desc">MobileNetV2 estimates class probabilities with confidence and margin gating.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">04 / RULE ENGINE</div>
-                <div className="step-title">Care Synthesis</div>
-                <div className="step-desc">Textile knowledge base generates safe wash temperature, cycle, and iron profiles.</div>
-              </div>
-              <div className="pipeline-step">
-                <div className="step-num">05 / ACTIVE LEARN</div>
-                <div className="step-title">Continuous Train</div>
-                <div className="step-desc">Human feedback automatically augments training sets for periodic model retraining.</div>
-              </div>
-            </div>
-          </section>
-
-          {/* Inside the Vision Engine */}
-          <section style={{ padding: "50px 0", borderTop: "1px solid var(--border)" }}>
-            <div className="section-header">
-              <span className="eyebrow">DEEP LEARNING CAPABILITIES</span>
-              <h2>Inside the Vision Engine</h2>
-              <p>What the computer vision model examines to distinguish delicate silks from heavy cotton twills.</p>
-            </div>
-            <div className="engine-grid">
-              <div className="engine-card">
-                <div className="engine-icon">🔍</div>
-                <h4>Texture</h4>
-                <p>Identifies micro-surface relief, fiber fuzziness, and roughness metrics.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">📐</div>
-                <h4>Weave Pattern</h4>
-                <p>Examines plain, twill, satin, or looped knit structural patterns.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">✨</div>
-                <h4>Optical Luster</h4>
-                <p>Distinguishes natural matte cottons from high-luster synthetics and silks.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">💬</div>
-                <h4>Context Notes</h4>
-                <p>Combines visual cues with optional user-supplied garment details.</p>
-              </div>
-              <div className="engine-card">
-                <div className="engine-icon">🛡️</div>
-                <h4>Confidence Gate</h4>
-                <p>Rejects low-certainty and non-fabric images to prevent false care guidance.</p>
-              </div>
-            </div>
-          </section>
-
-          {/* Supported Fabrics Showcase */}
-          <section style={{ padding: "50px 0", borderTop: "1px solid var(--border)" }}>
-            <div className="section-header">
-              <span className="eyebrow">TEXTILE INTELLIGENCE</span>
-              <h2>Supported Fabric Classes</h2>
-              <p>Explore our deep-care knowledge base across natural and synthetic materials.</p>
-            </div>
-            <div className="fabric-showcase-grid">
-              {Object.entries(FABRICS_DATA).map(([key, data]) => (
-                <div className="fabric-card-preview" key={key}>
-                  <div className="fabric-emoji">{data.emoji}</div>
-                  <h3>{data.name}</h3>
-                  <p>{data.overview}</p>
-                  <button
-                    className="btn btn-sage btn-sm"
-                    onClick={() => {
-                      setSelectedFabricKey(key);
-                      setPage("library");
-                    }}
-                  >
-                    View Care Spec →
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {/* Sustainability Highlight */}
-          <section className="sustainability-banner">
-            <div>
-              <span className="eyebrow" style={{ color: "#28E6A3" }}>SUSTAINABILITY FIRST</span>
-              <h2>Better Care. Lower Impact.</h2>
-              <p>
-                The right laundering conditions help garments last longer while reducing household water, energy, and microfiber pollution.
-              </p>
-            </div>
-            <div className="impact-pills-grid">
-              <div className="impact-pill">
-                <b>🌡️ Lower Temperatures</b>
-                <span>Saves up to 60% of washing electricity compared to hot cycles.</span>
-              </div>
-              <div className="impact-pill">
-                <b>🌬️ Air Drying</b>
-                <span>Eliminates tumble dryer energy and prevents thermal fiber wear.</span>
-              </div>
-              <div className="impact-pill">
-                <b>🌊 Gentler Agitation</b>
-                <span>Reduces mechanical friction and synthetic microfiber shedding.</span>
-              </div>
-              <div className="impact-pill">
-                <b>⏳ Extended Garment Life</b>
-                <span>Proper care prevents color fading, shrinkage, and premature disposal.</span>
-              </div>
-            </div>
-          </section>
-        </MotionPage>
+        <HomePage
+          isPublic={false}
+          onPrimaryCta={() => setPage("analyze")}
+          onLibrary={(key) => {
+            if (key) setSelectedFabricKey(key);
+            setPage("library");
+          }}
+        />
       )}
 
       {/* ========================================================
@@ -1547,9 +937,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             {/* STAGE 1 & 2: Workspace Panel */}
             <div className="workspace-panel">
               <span className="eyebrow">GARMENT SCANNER</span>
-              <h2><TextEffect>Scan a Garment</TextEffect></h2>
+              <h2><TextEffect>{t("analyze.title")}</TextEffect></h2>
               <p style={{ color: "var(--text-muted)", marginBottom: "20px" }}>
-                Upload a clear close-up of your garment's fabric surface for classification and care rules.
+                {t("analyze.subtitle")}
               </p>
 
               {/* Camera viewfinder — rendered OUTSIDE the drop-zone to avoid click conflicts */}
@@ -1753,10 +1143,10 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               {/* Action Buttons */}
               <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", marginTop: "24px" }}>
                 <button type="button" className="btn btn-secondary" onClick={() => input.current?.click()}>
-                  Upload Photo
+                  {t("analyze.upload")}
                 </button>
                 <button type="button" className="btn btn-secondary" onClick={() => useCamera("environment")}>
-                  Use Camera
+                  {t("analyze.camera")}
                 </button>
                 <button
                   type="button"
@@ -1764,7 +1154,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   disabled={!file}
                   onClick={() => onFileChange(undefined)}
                 >
-                  Clear
+                  {t("analyze.clear")}
                 </button>
                 <button
                   type="button"
@@ -1773,7 +1163,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   disabled={!file || isAnalyzing || !!noteError}
                   onClick={analyze}
                 >
-                  {isAnalyzing ? "Analyzing Fabric..." : "✨ Run AI Analysis"}
+                  {isAnalyzing ? t("analyze.analyzing") : `✨ ${t("analyze.run")}`}
                 </button>
               </div>
 
@@ -1980,7 +1370,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                             <div className="care-card">
                               <div className="care-card-icon">🫧</div>
                               <div className="care-card-label">WASHING</div>
-                              <div className="care-card-value">{result.recommendation.wash.temperature}</div>
+                              <div className="care-card-value">{convertTempText(result.recommendation.wash.temperature, tempUnit)}</div>
                               <span style={{ fontSize: "12px", color: "var(--text-light)" }}>{result.recommendation.wash.cycle}</span>
                             </div>
                             <div className="care-card">
@@ -2157,7 +1547,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                               <strong>💡 Detergent Tip:</strong> {detergentTip[fabricKey] ?? "Use a mild, fabric-appropriate detergent."}
                               {result.recommendation && (
                                 <span className="detergent-tip-extra">
-                                  🌡️ Wash at <strong>{result.recommendation.wash.temperature}</strong> · {result.recommendation.wash.cycle} cycle
+                                  🌡️ Wash at <strong>{convertTempText(result.recommendation.wash.temperature, tempUnit)}</strong> · {result.recommendation.wash.cycle} cycle
                                 </span>
                               )}
                             </div>
@@ -2172,7 +1562,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                           className="btn btn-secondary"
                           onClick={() => {
                             if (!result.recommendation) return;
-                            const text = `🧺 LaundryAI Care Profile\nFabric: ${result.fabric.toUpperCase()} (${result.confidence}% confidence)\nWash: ${result.recommendation.wash.temperature} · ${result.recommendation.wash.cycle}\nDry: ${result.recommendation.dry}\nIron: ${result.recommendation.iron}\nBleach: ${result.recommendation.bleach}\nEco Tip: ${result.recommendation.eco.join(" ")}`;
+                            const text = `🧺 LaundryAI Care Profile\nFabric: ${result.fabric.toUpperCase()} (${result.confidence}% confidence)\nWash: ${convertTempText(result.recommendation.wash.temperature, tempUnit)} · ${result.recommendation.wash.cycle}\nDry: ${result.recommendation.dry}\nIron: ${result.recommendation.iron}\nBleach: ${result.recommendation.bleach}\nEco Tip: ${result.recommendation.eco.join(" ")}`;
                             void navigator.clipboard.writeText(text);
                             setCopied(true);
                             setTimeout(() => setCopied(false), 2000);
@@ -2208,9 +1598,9 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         <MotionPage className="page-container">
           <Reveal>
           <span className="eyebrow">MODEL METRICS & USAGE</span>
-          <h1><TextEffect>Model performance, made clear.</TextEffect></h1>
+          <h1><TextEffect>{t("insights.title")}</TextEffect></h1>
           <p style={{ color: "var(--text-muted)", marginBottom: "32px" }}>
-            Real data-derived statistics from verified garment classifications and active learning dataset growth.
+            {t("insights.subtitle")}
           </p>
 
           {/* Top KPI Cards */}
@@ -2325,420 +1715,27 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           FABRIC LIBRARY & COMPARISON
           ======================================================== */}
       {page === "library" && (
+        <LibraryPage initialKey={selectedFabricKey} tempUnit={tempUnit} />
+      )}
+
+      {page === "admin" && user.is_admin && <AdminConsole user={user} />}
+
+      {/* ========================================================
+          HISTORY PAGE (My Scans)
+          ======================================================== */}
+      {page === "history" && (
         <MotionPage className="page-container">
-          <Reveal>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "12px", marginBottom: "20px" }}>
-            <div>
-              <span className="eyebrow">TEXTILE KNOWLEDGE BASE</span>
-              <h1><TextEffect>Fabric care, without guesswork.</TextEffect></h1>
-            </div>
-            <MotionButton
-              whileHover={{ y: -2 }}
-              whileTap={{ scale: .985 }}
-              className="btn btn-secondary"
-              onClick={() => setCompareActive(!compareActive)}
-            >
-              {compareActive ? "View Single Fabric" : "📊 Compare All Fabrics"}
-            </MotionButton>
-          </div>
-
-          {/* Comparison Matrix View */}
-          {compareActive ? (
-            <div className="comparison-table-wrapper">
-              <table className="comparison-table">
-                <thead>
-                  <tr>
-                    <th>Fabric Class</th>
-                    <th>Category</th>
-                    <th>Wash Temp</th>
-                    <th>Cycle</th>
-                    <th>Drying</th>
-                    <th>Ironing</th>
-                    <th>Shrinkage Risk</th>
-                    <th>Heat Sensitivity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(FABRICS_DATA).map(([key, data]) => (
-                    <tr key={key}>
-                      <td><b>{data.emoji} {data.name}</b></td>
-                      <td>{data.category}</td>
-                      <td>{data.washTemp}</td>
-                      <td>{data.cycle}</td>
-                      <td>{data.dry}</td>
-                      <td>{data.iron}</td>
-                      <td><span className={`tag-chip ${data.shrinkRisk === "High" ? "danger" : ""}`}>{data.shrinkRisk}</span></td>
-                      <td><span className="tag-chip">{data.heatSens}</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div>
-              {/* Fabric Picker Chips */}
-              <div className="tag-container" style={{ marginBottom: "28px" }}>
-                {Object.entries(FABRICS_DATA).map(([key, data]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`tag-chip ${selectedFabricKey === key ? "active" : ""}`}
-                    style={{
-                      background: selectedFabricKey === key ? "var(--primary)" : "var(--surface)",
-                      color: selectedFabricKey === key ? "#FFFFFF" : "var(--dark)",
-                      fontSize: "14px",
-                      padding: "8px 18px"
-                    }}
-                    onClick={() => setSelectedFabricKey(key)}
-                  >
-                    {data.emoji} {data.name}
-                  </button>
-                ))}
-              </div>
-
-              {/* Selected Fabric 6-Section Spec Card */}
-              {(() => {
-                const current = FABRICS_DATA[selectedFabricKey];
-                return (
-                  <div className="workspace-panel">
-                    <span className="eyebrow">{current.category}</span>
-                    <h2 style={{ fontSize: "36px", marginBottom: "8px" }}>{current.emoji} {current.name}</h2>
-                    <p style={{ color: "var(--text-muted)", fontSize: "16px", marginBottom: "28px" }}>{current.overview}</p>
-
-                    <div className="care-profile-grid">
-                      <div className="care-card">
-                        <div className="care-card-icon">🫧</div>
-                        <div className="care-card-label">WASH TEMP</div>
-                        <div className="care-card-value">{current.washTemp}</div>
-                        <span style={{ fontSize: "12px", color: "var(--text-light)" }}>{current.cycle}</span>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">◌</div>
-                        <div className="care-card-label">DRYING</div>
-                        <div className="care-card-value">{current.dry}</div>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">♨</div>
-                        <div className="care-card-label">IRONING</div>
-                        <div className="care-card-value">{current.iron}</div>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">⚠️</div>
-                        <div className="care-card-label">SHRINKAGE</div>
-                        <div className="care-card-value">{current.shrinkRisk}</div>
-                      </div>
-                      <div className="care-card">
-                        <div className="care-card-icon">🔥</div>
-                        <div className="care-card-label">HEAT SENSITIVITY</div>
-                        <div className="care-card-value">{current.heatSens}</div>
-                      </div>
-                    </div>
-
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginTop: "24px" }}>
-                      <div className="rationale-box">
-                        <h4>Visual Characteristics (Computer Vision Cues)</h4>
-                        <p>{current.visual}</p>
-                      </div>
-                      <div className="rationale-box" style={{ background: "var(--warm-beige)", borderColor: "#DECDB5" }}>
-                        <h4 style={{ color: "var(--dark)" }}>Sustainability Impact</h4>
-                        <p>{current.sustainability}</p>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-          )}
-          </Reveal>
+          <HistoryPage />
         </MotionPage>
       )}
 
-      {page === "admin" && user.is_admin && (
-        <main className="admin-page">
-          <div className="admin-command-bar"><span><i /> LaundryAI administration</span><small>Protected operations workspace</small><strong>{adminOverview?.model_ready ? "Inference online" : "Operations ready"}</strong></div>
-          <section className="admin-hero">
-            <div>
-              <span className="eyebrow">ADMIN CONTROL CENTER</span>
-              <h1><TextEffect>Operate the platform.</TextEffect></h1>
-              <p>Monitor production, review every correction, manage access, and release validated models from one workspace.</p>
-            </div>
-            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>{adminLastUpdated ? `Last synchronized ${adminLastUpdated}` : "Waiting for first sync"}</small><button type="button" disabled={adminLoading} onClick={() => setAdminRefreshKey((value) => value+1)}>{adminLoading ? "Refreshing…" : "↻ Refresh all data"}</button></div>
-          </section>
-
-          <div className="admin-console-shell">
-            <aside className="admin-command-rail">
-              <div className="admin-rail-heading"><span>Workspace</span><small>Choose an operational area</small></div>
-              <nav className="admin-tabs" aria-label="Admin operations" role="tablist">
-                {[
-                  ['operations', 'Operations', 'Service health & dataset stats', '⚡'],
-                  ['review', `Review · ${adminFeedback.length}`, 'Approve corrections & scan logs', '👁️'],
-                  ['model', 'Model Release', 'Train, evaluate & promote', '🧠'],
-                  ['users', `Users · ${adminUsers.length}`, 'Roles & access control', '👥'],
-                  ['reference', 'Reference', 'Runbook & service links', '📖']
-                ].map(([key, label, description, icon], index) => {
-                  const isActive = adminTab === key || (key === 'operations' && adminTab === 'overview') || (key === 'review' && adminTab === 'feedback');
-                  return (
-                    <button
-                      type="button"
-                      key={key}
-                      className={isActive ? "active" : ""}
-                      role="tab"
-                      aria-selected={isActive}
-                      tabIndex={isActive ? 0 : -1}
-                      onClick={() => setAdminTab(key as any)}
-                    >
-                      <b>0{index + 1}</b>
-                      <span>{icon} {label}<small>{description}</small></span>
-                    </button>
-                  );
-                })}
-              </nav>
-              <div className="admin-rail-footer"><span className={adminOverview?.model_ready ? "online" : "pending"} /><div><b>Inference API</b><small>{adminOverview?.model_ready ? "Operational" : "Checking connection"}</small></div></div>
-            </aside>
-            <MotionPanel panelKey={`${adminTab}-${adminRefreshKey}`} className={`admin-command-main ${adminLoading ? "is-refreshing" : ""}`}>
-              {adminMessage && <div className="admin-alert">{adminMessage}</div>}
-              {Object.keys(adminErrors).length > 0 && (
-                <div className="admin-inline-error" role="alert">
-                  <b>Some admin data is unavailable</b>
-                  <span>{Object.entries(adminErrors).map(([area, message]) => `${area}: ${message}`).join(" ")}</span>
-                  <button type="button" className="btn btn-outline" onClick={() => setAdminRefreshKey((value) => value + 1)}>Retry</button>
-                </div>
-              )}
-
-          {(adminTab === "operations" || adminTab === "overview") && <>
-          <section className="admin-stats-grid">
-            <div><span>Total scans</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.total_scans ?? "—"}</b><small>Recorded analyses</small></div>
-            <div><span>Active users</span><b>{adminPanelLoading.users ? "…" : adminUsers.length || "—"}</b><small>Firebase accounts</small></div>
-            <div><span>Pending reviews</span><b>{adminPanelLoading.feedback ? "…" : adminFeedback.length}</b><small>Corrections awaiting approval</small></div>
-            <div><span>Dataset samples</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b><small>Across supported classes</small></div>
-            <div><span>Model status</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.model_ready == null ? "—" : adminOverview.model_ready ? "Ready" : "Blocked"}</b><small>Live inference availability</small></div>
-            <div><span>Audit events</span><b>{adminPanelLoading.audit ? "…" : adminAudit.length || "—"}</b><small>Recorded admin actions</small></div>
-          </section>
-          <section className="admin-trend-panel">
-            <div className="admin-section-heading"><div><span className="eyebrow">ACTIVITY TREND</span><h2>Scans this week</h2></div><span className="admin-count">{adminScans.length ? "Last 7 days" : "No scan data"}</span></div>
-            {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan activity…</p> : adminScans.length ? <div className="admin-trend" aria-label="Seven day scan activity">
-              {trendDays.map((day) => <div className="admin-trend-day" key={day.key}><strong>{day.count}</strong><div className="admin-trend-bar"><i style={{ height: `${Math.max(8, day.count / trendMax * 100)}%` }} /></div><small>{day.label}</small></div>)}
-            </div> : <p className="admin-empty">Scan activity will appear after the API records scans.</p>}
-          </section>
-
-          <section className="admin-health-panel">
-            <div className="admin-section-heading">
-              <div><span className="eyebrow">SYSTEM READINESS</span><h2>Production health</h2></div>
-              <strong className="readiness-score">{adminPanelLoading.health ? "…" : adminHealth ? [
-                adminOverview?.model_ready,
-                adminOverview?.auth?.firebase_project,
-                adminOverview?.auth?.admin_allowlist,
-                adminOverview?.persistence?.backend === "firebase",
-                adminOverview?.persistence?.reachable === true,
-              ].filter(Boolean).length * 20 : "—"}{adminHealth && "%"}</strong>
-            </div>
-            <div className="admin-service-grid">
-              {[
-                ["AI inference", adminOverview?.model_ready, adminOverview?.model_ready ? "TorchScript model loaded" : "Model unavailable"],
-                ["Authentication", adminOverview?.auth?.firebase_project, "Google-signed Firebase tokens"],
-                ["Admin policy", adminOverview?.auth?.admin_allowlist, "Verified email allowlist"],
-                ["Database mode", adminOverview?.persistence?.backend === "firebase", adminOverview?.persistence?.database || "Checking"],
-                ["Cloud connection", adminOverview?.persistence?.reachable === true, adminOverview?.persistence?.reachable === false ? `Blocked: ${adminOverview?.persistence?.error || "configuration"}` : "Database and Storage reachable"],
-              ].map(([label,ok,detail]) => <div className={`admin-service ${ok ? "healthy" : "blocked"}`} key={String(label)}><span>{ok ? "✓" : "!"}</span><div><b>{String(label)}</b><small>{String(detail)}</small></div></div>)}
-            </div>
-          </section>
-
-          <section className="admin-audit-panel">
-            <div className="admin-section-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h2>Recent administrative activity</h2></div><span className="admin-count">{adminAudit.length ? `${adminAudit.length} events` : "No events"}</span></div>
-            {adminPanelLoading.audit ? <p className="admin-panel-loading" role="status">Loading audit history…</p> : adminAudit.length ? <div className="admin-audit-list">
-              {adminAudit.slice(0, 8).map((entry, index) => <div className="admin-audit-row" key={entry.id || `${entry.action}-${index}`}><span className="admin-audit-icon">↳</span><div><strong>{entry.action || "Administrative event"}</strong><small>{entry.detail || entry.actor || "Recorded by the platform"}{entry.created_at ? ` · ${new Date(entry.created_at).toLocaleString()}` : ""}</small></div></div>)}
-            </div> : adminErrors.audit ? <p className="admin-panel-error" role="status">{adminErrors.audit}</p> : <p className="admin-empty">No audit endpoint data is available yet.</p>}
-          </section>
-
-          <section className="admin-review-queue">
-            <div className="admin-section-heading">
-              <div><span className="eyebrow">DATASET OBSERVABILITY</span><h2>Class balance</h2></div>
-              <span className="admin-count">{adminOverview?.dataset?.total_samples ?? 0} samples</span>
-            </div>
-            <div className="admin-dataset-grid">
-              {Object.entries(adminOverview?.dataset?.classes || {}).map(([label,value]: [string, any]) => {
-                const maximum=Math.max(1,...Object.values(adminOverview?.dataset?.classes || {}).map((item:any) => Number(item.total)||0));
-                return <div className="admin-dataset-row" key={label}><span>{label.replace("_"," ")}</span><div><i style={{width:`${Math.max(3,(Number(value.total)||0)/maximum*100)}%`}} /></div><b>{value.total}</b><small>{value.user_verified} reviewed</small></div>;
-              })}
-            </div>
-          </section>
-          </>}
-
-          {adminTab === "model" &&
-          <section className="admin-workspace">
-            <div>
-              <span className="eyebrow">MODEL DELIVERY / {String(adminOverview?.training_mode || "checking").replace(/_/g," ")}</span>
-              <h2>GPU training and controlled release</h2>
-              <p>Approved feedback becomes a versioned dataset. Training runs on a dedicated GPU worker, while Render keeps the current model online until the candidate passes accuracy, macro-F1, recall, latency, and regression gates.</p>
-              {adminOverview?.training_available ? <button className="btn btn-primary" type="button" onClick={async () => {
-                if (!window.confirm("Dispatch GPU training from approved feedback?")) return;
-                setAdminMessage("Dispatching the reviewed dataset to the training worker…");
-                try {
-                  const response = await apiFetch(`${API}/retrain`, { method: "POST" });
-                  const data = await response.json();
-                  if (!response.ok) throw new Error(data.detail || "Could not start retraining.");
-                  setAdminMessage(data.message || "Retraining started.");
-                  setAdminOverview((current: any) => ({ ...current, retraining: { status: "running", message: data.message } }));
-                } catch (error) {
-                  setAdminMessage(error instanceof Error ? error.message : "Could not start retraining.");
-                }
-              }}>{adminOverview?.training_mode === "external_gpu" ? "Dispatch GPU training" : "Start reviewed training"}</button> : <div className="training-disabled"><b>Training is in review-only mode</b><span>Predictions and approved feedback continue to work. Train approved batches on the local RTX GPU, then use the release gate before deploying a candidate.</span></div>}
-              {adminOverview?.retraining?.status === "running" && <MotionPanel panelKey="training-running" className="admin-live-status"><span className="live-dot" /> Model training is running. Status refreshes automatically.</MotionPanel>}
-              {adminOverview?.retraining?.status === "completed" && <MotionPanel panelKey="training-completed" className="admin-live-status"><span className="live-dot" /> Candidate ready. Review its metrics before promotion.</MotionPanel>}
-            </div>
-            <div className="admin-checklist">
-              <h3>Before deployment</h3>
-              <p>1. Approve corrected labels</p>
-              <p>2. Export the reviewed dataset</p>
-              <p>3. Train a versioned candidate offline</p>
-              <p>4. Compare held-out metrics and regressions</p>
-              <p>5. Promote through a reviewed deployment</p>
-              <div className="model-metric-mini"><span>Current accuracy <b>{adminOverview?.model_metrics?.test_accuracy != null ? `${(adminOverview.model_metrics.test_accuracy*100).toFixed(1)}%` : "Not recorded"}</b></span><span>Macro F1 <b>{adminOverview?.model_metrics?.macro_f1 != null ? `${(adminOverview.model_metrics.macro_f1*100).toFixed(1)}%` : "Not recorded"}</b></span></div>
-            </div>
-          </section>}
-
-          {(adminTab === "review" || adminTab === "feedback") && (
-            <section className="admin-review-queue">
-              <div className="admin-section-heading">
-                <div>
-                  <span className="eyebrow">HUMAN REVIEW & PLATFORM SCANS</span>
-                  <h2>{reviewSubtab === "pending" ? "Pending training feedback" : "All user garment scans"}</h2>
-                </div>
-                <div className="admin-subtab-switch" style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    className={`btn ${reviewSubtab === "pending" ? "btn-primary" : "btn-outline"}`}
-                    style={{ fontSize: "11px", padding: "6px 14px", height: "auto" }}
-                    onClick={() => setReviewSubtab("pending")}
-                  >
-                    Pending Approvals ({adminFeedback.length})
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${reviewSubtab === "scans" ? "btn-primary" : "btn-outline"}`}
-                    style={{ fontSize: "11px", padding: "6px 14px", height: "auto" }}
-                    onClick={() => setReviewSubtab("scans")}
-                  >
-                    All User Scans ({adminScans.length})
-                  </button>
-                </div>
-              </div>
-              <div className="admin-toolbar">
-                <label className="admin-search"><span className="sr-only">Search review records</span><input value={reviewQuery} onChange={(event) => setReviewQuery(event.target.value)} placeholder={reviewSubtab === "pending" ? "Search fabric or filename" : "Search fabric, note, or user ID"} type="search" /></label>
-                {reviewSubtab === "scans" && <label className="admin-filter"><span className="sr-only">Filter scan feedback</span><select value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value as typeof reviewFilter)}><option value="all">All scan statuses</option><option value="confirmed">User confirmed</option><option value="corrected">User corrected</option></select></label>}
-              </div>
-
-              {reviewSubtab === "pending" && (
-                <>
-                  {adminPanelLoading.feedback ? <p className="admin-panel-loading" role="status">Loading feedback queue…</p> : filteredFeedback.length ? filteredFeedback.map((item) => (
-                    <article className="admin-review-row" key={`${item.fabric}/${item.file}`}>
-                      <AdminFeedbackPreview item={item} />
-                      <div className="admin-review-copy">
-                        <strong>{item.fabric}</strong>
-                        {item.original_fabric && <span>Model predicted: {item.original_fabric}</span>}
-                        <small>{item.filename || item.file}</small>
-                      </div>
-                      <div className="admin-row-actions">
-                        <button type="button" className="btn btn-primary" onClick={async () => {
-                          const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}/approve`, { method: "POST" });
-                          if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
-                          else setAdminMessage("Could not approve this feedback item.");
-                        }}>Approve label</button>
-                        <button type="button" className="btn btn-outline" onClick={async () => {
-                          if (!window.confirm("Reject this feedback image?")) return;
-                          const response = await apiFetch(`${API}/admin/feedback/${encodeURIComponent(item.fabric)}/${encodeURIComponent(item.file)}`, { method: "DELETE" });
-                          if (response.ok) setAdminFeedback((items) => items.filter((candidate) => candidate.file !== item.file));
-                          else setAdminMessage("Could not reject this feedback item.");
-                        }}>Reject</button>
-                      </div>
-                    </article>
-                  )) : <p className="admin-empty">{adminFeedback.length ? "No feedback matches this search." : "No feedback is waiting for review. New user corrections will appear here for approval."}</p>}
-                </>
-              )}
-
-              {reviewSubtab === "scans" && (
-                <div className="admin-scans-list" style={{ display: "grid", gap: "10px", marginTop: "14px" }}>
-                  {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan history…</p> : filteredScans.length ? filteredScans.map((scan: any) => (
-                    <article className="admin-review-row admin-scan-card" key={String(scan.id)}>
-                      <div className="admin-user-avatar" style={{ fontSize: "20px", background: "rgba(67,214,162,0.12)", color: "#43d6a2" }}>
-                        🧺
-                      </div>
-                      <div className="admin-review-copy">
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
-                          <strong style={{ textTransform: "capitalize", fontSize: "14px" }}>{scan.fabric || "Unknown"}</strong>
-                          <span className="admin-badge ok" style={{ fontSize: "10px" }}>{Math.round(scan.confidence || 0)}% confidence</span>
-                          {scan.user_feedback ? (
-                            scan.user_feedback.was_correct ? (
-                              <span className="admin-badge ok" style={{ fontSize: "10px" }}>✓ User confirmed</span>
-                            ) : (
-                              <span className="admin-badge warn" style={{ fontSize: "10px" }}>⚠️ Corrected to {scan.user_feedback.confirmed_fabric}</span>
-                            )
-                          ) : (
-                            <span className="admin-badge" style={{ fontSize: "10px", background: "rgba(255,255,255,0.06)", color: "#8ca69b" }}>Scan record</span>
-                          )}
-                        </div>
-                        {scan.note && <p style={{ margin: "2px 0 4px", color: "#c2d6ce", fontSize: "12px" }}>"{scan.note}"</p>}
-                        <small style={{ color: "#78968a" }}>{scan.created_at ? new Date(scan.created_at).toLocaleString() : "Date recorded"} • User UID: {String(scan.owner_uid || scan.id || "").slice(0, 10)}</small>
-                      </div>
-                    </article>
-                  )) : <p className="admin-empty">{adminScans.length ? "No scans match this search or filter." : "No scan records recorded yet."}</p>}
-                </div>
-              )}
-            </section>
-          )}
-
-          {adminTab === "users" &&
-          <section className="admin-review-queue admin-users">
-            <div className="admin-section-heading">
-              <div><span className="eyebrow">ACCESS CONTROL</span><h2>Users and administrator roles</h2></div>
-              <span className="admin-count">{adminUsers.length} users</span>
-            </div>
-            <p className="admin-section-copy">Grant only trusted accounts administrator access. Role changes take effect after the user signs out and signs in again.</p>
-            <label className="admin-search"><span className="sr-only">Search users</span><input value={userQuery} onChange={(event) => setUserQuery(event.target.value)} placeholder="Search name, email, or user ID" type="search" /></label>
-            {adminPanelLoading.users ? <p className="admin-panel-loading" role="status">Loading user directory…</p> : filteredUsers.length ? filteredUsers.map((account) => (
-              <article className="admin-user-row" key={account.uid}>
-                <div className="admin-user-avatar">{account.picture ? <img src={account.picture} alt="" referrerPolicy="no-referrer" /> : (account.email || "?").charAt(0).toUpperCase()}</div>
-                <div className="admin-review-copy">
-                  <strong>{account.name || account.email || "Unnamed user"}</strong>
-                  <small>{account.email || account.uid}</small>
-                  <div className="admin-badges">
-                    <span className={account.email_verified ? "ok" : "warn"}>{account.email_verified ? "Verified" : "Unverified"}</span>
-                    {account.is_admin && <span className="admin-badge">Admin</span>}
-                    {account.disabled && <span className="danger">Disabled</span>}
-                  </div>
-                </div>
-                <div className="admin-row-actions">
-                  <button type="button" className="btn btn-outline" disabled={account.uid === user.uid && account.is_admin} onClick={async () => {
-                    const next=!account.is_admin;
-                    const response=await apiFetch(`${API}/admin/users/${encodeURIComponent(account.uid)}/role`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({is_admin:next})});
-                    if (response.ok) setAdminUsers((items) => items.map((item) => item.uid === account.uid ? {...item,is_admin:next} : item));
-                    else setAdminMessage((await response.json()).detail || "Could not update this role.");
-                  }}>{account.is_admin ? "Remove admin" : "Make admin"}</button>
-                  <button type="button" className={`btn ${account.disabled ? "btn-primary" : "btn-outline"}`} disabled={account.uid === user.uid} onClick={async () => {
-                    const next=!account.disabled;
-                    if (next && !window.confirm(`Disable ${account.email || "this user"}?`)) return;
-                    const response=await apiFetch(`${API}/admin/users/${encodeURIComponent(account.uid)}/status`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({disabled:next})});
-                    if (response.ok) setAdminUsers((items) => items.map((item) => item.uid === account.uid ? {...item,disabled:next} : item));
-                    else setAdminMessage((await response.json()).detail || "Could not update this account.");
-                  }}>{account.disabled ? "Enable user" : "Disable user"}</button>
-                </div>
-              </article>
-            )) : <p className="admin-empty">{adminUsers.length ? "No users match this search." : adminErrors.users || "No Firebase users could be loaded."}</p>}
-          </section>}
-
-          {adminTab === "reference" && <section className="admin-reference">
-            <div className="admin-section-heading"><div><span className="eyebrow">OPERATIONS REFERENCE</span><h2>Runbook and service endpoints</h2></div><span className="admin-count">Production</span></div>
-            <p className="admin-section-copy">Use these links and checks to diagnose the platform without leaving the control center.</p>
-            <div className="admin-reference-grid">
-              <article><span>01</span><h3>API health</h3><p>Confirm model readiness and Firebase persistence reachability.</p><a href={`${API}/health`} target="_blank" rel="noreferrer">Open health endpoint ↗</a></article>
-              <article><span>02</span><h3>API documentation</h3><p>Inspect request formats and test authorized service endpoints.</p><a href={`${API.replace(/\/api$/,"")}/docs`} target="_blank" rel="noreferrer">Open API docs ↗</a></article>
-              <article><span>03</span><h3>Review workflow</h3><p>User corrections stay pending until an administrator approves or rejects them.</p><button type="button" onClick={() => setAdminTab("review")}>Open review queue →</button></article>
-              <article><span>04</span><h3>Release workflow</h3><p>Only promote a candidate after held-out metrics and regression checks pass.</p><button type="button" onClick={() => setAdminTab("model")}>Open model release →</button></article>
-            </div>
-          </section>}
-            </MotionPanel>
-          </div>
-        </main>
+      {/* ========================================================
+          CARE ASSISTANT PAGE
+          ======================================================== */}
+      {page === "assistant" && (
+        <MotionPage className="page-container">
+          <CareAssistant />
+        </MotionPage>
       )}
 
       {/* ========================================================
@@ -2749,7 +1746,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           <Reveal>
           <div style={{ maxWidth: "840px", margin: "0 auto" }}>
             <span className="eyebrow">ABOUT THE PLATFORM</span>
-            <h1><TextEffect>Built for clearer garment care.</TextEffect></h1>
+            <h1><TextEffect>{t("about.title")}</TextEffect></h1>
             <p style={{ color: "var(--text-muted)", fontSize: "17px", lineHeight: "1.6", marginBottom: "28px" }}>
               LaundryAI is an AI-powered textile intelligence system developed to bridge computer vision with household fabric care and environmental sustainability.
             </p>
@@ -2774,8 +1771,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 </div>
                 <div className="care-card">
                   <div className="care-card-icon">💾</div>
-                  <div className="care-card-label">DATABASE</div>
-                  <div className="care-card-value">SQLite3 Engine</div>
+                              <div className="care-card-label">DATABASE</div>
+                              <div className="care-card-value">Firebase RTDB (cloud) · SQLite (local dev)</div>
                 </div>
               </div>
             </div>
@@ -2792,40 +1789,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       )}
 
       {/* Multi-Column Professional Footer */}
-      <footer className="app-footer">
-        <div className="footer-grid">
-          <div className="footer-brand">
-            <h3>🧺 LaundryAI</h3>
-            <p>AI-assisted fabric intelligence for safer, smarter, and more sustainable domestic garment care.</p>
-          </div>
-          <div className="footer-col">
-            <h4>Platform</h4>
-            <ul className="footer-links">
-              <li><button type="button" onClick={() => setPage("home")}>Home</button></li>
-              <li><button type="button" onClick={() => setPage("analyze")}>Analyze Garment</button></li>
-              <li><button type="button" onClick={() => setPage("insights")}>Model Transparency</button></li>
-              <li><button type="button" onClick={() => setPage("library")}>Fabric Care Guide</button></li>
-            </ul>
-          </div>
-          <div className="footer-col">
-            <h4>System</h4>
-            <ul className="footer-links">
-              <li><button type="button" onClick={() => setPage("about")}>How it works</button></li>
-              {user.is_admin && <li><button type="button" onClick={() => setPage("admin")}>Admin operations</button></li>}
-            </ul>
-          </div>
-          <div className="footer-col">
-            <h4>Important Notice</h4>
-            <div className="footer-disclaimer-box">
-              AI predictions are advisory. Always check and follow manufacturer care tags when available.
-            </div>
-          </div>
-        </div>
-        <div className="footer-bottom">
-          <span>© 2026 LaundryAI • Computer Vision × Textile Intelligence Platform</span>
-          <span>See the Fabric. Understand the Care.</span>
-        </div>
-      </footer>
+      <SiteFooter
+        onHome={() => setPage("home")}
+        onGuide={() => setPage("library")}
+        onResearch={() => setPage("insights")}
+        onAbout={() => setPage("about")}
+        onScan={() => setPage("analyze")}
+        onAdmin={user.is_admin ? () => setPage("admin") : undefined}
+      />
     </>
   );
 }
@@ -2867,7 +1838,9 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 
 createRoot(document.getElementById("root")!).render(
   <AppErrorBoundary>
-    <AuthGate />
+    <LangProvider>
+      <AuthGate />
+    </LangProvider>
   </AppErrorBoundary>,
 );
 
