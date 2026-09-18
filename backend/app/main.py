@@ -85,35 +85,103 @@ class TrainingCallback(BaseModel):
     candidate_url: Optional[str] = Field(default=None, max_length=2000)
     metrics: Optional[dict] = None
 
+FIREBASE_CERTIFICATES_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
+CERTIFICATE_TTL_SECONDS = 3600
+CERTIFICATE_MIN_TTL_SECONDS = 300
+CERTIFICATE_MAX_TTL_SECONDS = 21600
+_certificate_lock = threading.Lock()
+_certificate_cache: dict = {"certificates": {}, "expires_at": 0.0}
+
 def firebase_auth_enabled() -> bool:
     """Token verification needs the Firebase project identity, not a private key."""
     return all(FIREBASE_CONFIG[key] for key in ("apiKey", "authDomain", "projectId", "appId"))
+
+def firebase_token_issuer() -> str:
+    return f"https://securetoken.google.com/{FIREBASE_CONFIG['projectId']}"
+
+def _certificate_ttl(response) -> int:
+    """Honour Google's Cache-Control max-age so signing-key rotations still arrive."""
+    ttl = CERTIFICATE_TTL_SECONDS
+    for directive in (response.headers.get("Cache-Control") or "").split(","):
+        directive = directive.strip()
+        if directive.startswith("max-age="):
+            try:
+                ttl = int(directive.split("=", 1)[1])
+            except ValueError:
+                ttl = CERTIFICATE_TTL_SECONDS
+    return min(max(ttl, CERTIFICATE_MIN_TTL_SECONDS), CERTIFICATE_MAX_TTL_SECONDS)
+
+def google_signing_certificates(force: bool = False) -> dict:
+    """Return Google's Firebase signing certificates, cached in memory.
+
+    google-auth re-fetches these certificates on *every* verification, so a slow,
+    blocked, or rate-limited certificate endpoint used to turn every authenticated
+    API request into a 503 immediately after a successful browser sign-in. The
+    documents are public keys, so they are fetched once per cache lifetime and
+    refreshed when Google rotates a key or the cached lifetime expires.
+    """
+    with _certificate_lock:
+        certificates = _certificate_cache["certificates"]
+        if certificates and not force and time.monotonic() < _certificate_cache["expires_at"]:
+            return certificates
+    request = urlrequest.Request(
+        FIREBASE_CERTIFICATES_URL,
+        headers={"User-Agent": "LaundryAI-API/0.1", "Cache-Control": "no-cache"},
+    )
+    with urlrequest.urlopen(request, timeout=8) as response:
+        document = json.loads(response.read().decode("utf-8"))
+        ttl = _certificate_ttl(response)
+    if not isinstance(document, dict) or not document:
+        raise ValueError("Google returned an unexpected certificate document.")
+    with _certificate_lock:
+        _certificate_cache["certificates"] = document
+        _certificate_cache["expires_at"] = time.monotonic() + ttl
+    return document
+
+def certificates_or_unavailable(force: bool = False) -> dict:
+    try:
+        return google_signing_certificates(force=force)
+    except Exception as exc:
+        raise HTTPException(503, "Firebase verification is temporarily unavailable.") from exc
+
+def decode_firebase_claims(id_token: str, certificates: dict):
+    """Verify the RS256 signature, expiry, and audience against cached certificates."""
+    from google.auth import jwt as google_jwt
+    return google_jwt.decode(id_token, certs=certificates, audience=FIREBASE_CONFIG["projectId"])
 
 def verify_firebase_token(id_token: str):
     """Verify signature, issuer, audience, and expiry using Google's public certificates."""
     if not firebase_auth_enabled():
         raise HTTPException(503, "Firebase project configuration is missing on the server.")
+    from google.auth import exceptions as google_exceptions
     try:
-        from google.auth.transport.requests import Request as GoogleRequest
-        from google.oauth2 import id_token as google_id_token
-        return google_id_token.verify_firebase_token(
-            id_token,
-            GoogleRequest(),
-            audience=FIREBASE_CONFIG["projectId"],
-        )
+        try:
+            claims = decode_firebase_claims(id_token, certificates_or_unavailable())
+        except google_exceptions.MalformedError as rotated_key:
+            if "key id" not in str(rotated_key):
+                raise
+            # Google rotated its signing keys: refresh the cache once and retry.
+            claims = decode_firebase_claims(id_token, certificates_or_unavailable(force=True))
     except HTTPException:
         raise
     except Exception as exc:
         error_name=type(exc).__name__
-        if error_name in {"ExpiredIdTokenError", "RevokedIdTokenError"}:
+        if error_name in {"ExpiredIdTokenError", "RevokedIdTokenError"} or "expired" in str(exc).lower():
             detail="Your sign-in session expired. Sign in again."
-        elif error_name in {"CertificateFetchError", "TransportError"}:
-            raise HTTPException(503, "Firebase verification is temporarily unavailable.") from exc
-        elif error_name in {"InvalidIdTokenError", "InvalidSessionCookieError", "ValueError"}:
+        elif error_name in {"MalformedError", "InvalidValue", "InvalidIdTokenError", "InvalidSessionCookieError", "ValueError"}:
             detail="Firebase returned an invalid sign-in token."
         else:
             detail=f"Firebase could not verify sign-in ({error_name})."
         raise HTTPException(401, detail) from exc
+    if claims.get("iss") != firebase_token_issuer():
+        raise HTTPException(401, "Firebase returned an invalid sign-in token.")
+    # Firebase puts the account id in `sub`; the rest of the API (and every
+    # stored record) reads `uid`, so without this every signed-in user shared
+    # the same "local-preview" history bucket.
+    uid = str(claims.get("sub") or claims.get("user_id") or "").strip()
+    if not uid:
+        raise HTTPException(401, "Firebase returned an invalid sign-in token.")
+    return {**claims, "uid": uid}
 
 def is_admin(user: dict | None) -> bool:
     return bool(

@@ -6,4 +6,6 @@ numpy>=1.26
 torch>=2.3
 torchvision>=0.18
 firebase-admin>=6.5
+# Imported directly for Firebase ID-token signature verification.
+google-auth>=2.30
 python-dotenv>=1.0

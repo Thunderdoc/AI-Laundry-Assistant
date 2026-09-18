@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { useReducedMotion } from "motion/react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
@@ -16,6 +16,10 @@ const API = configuredApi || (window.location.hostname.endsWith("vercel.app")
   : "/api");
 const NOTE_MAX_LENGTH = 240;
 const AUTH_SESSION_KEY = "laundryai_explicit_auth_session";
+const TOKEN_STORAGE_KEY = "laundryai_firebase_token";
+// Firebase ID tokens live for one hour. Treat a token as unusable slightly
+// before that so a request never leaves with a token that expires mid-flight.
+const TOKEN_EXPIRY_SLACK_MS = 60_000;
 
 type SignedInUser = { uid: string; email: string; name: string; picture?: string | null; guest?: boolean; is_admin?: boolean };
 type FirebaseSettings = { enabled: boolean; firebase_config: Record<string, string> | null };
@@ -45,11 +49,83 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
   return withTimeout(fetch(input, init), timeoutMs, "The authentication service timed out.");
 }
 
-async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
-  const headers = new Headers(init.headers);
-  const token = localStorage.getItem("laundryai_firebase_token");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(input, { ...init, headers });
+function tokenExpiry(token: string): number {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return 0;
+    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof claims?.exp === "number" ? claims.exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeStoredToken(token: string) {
+  const stored = { token, expires_at: tokenExpiry(token) };
+  try {
+    localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // Private browsing can refuse storage; the in-memory Firebase session still works.
+  }
+}
+
+function readStoredToken(): string | null {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  const usableAfter = Date.now() + TOKEN_EXPIRY_SLACK_MS;
+  try {
+    const stored = JSON.parse(raw) as { token?: string; expires_at?: number };
+    return stored?.token && (stored.expires_at || 0) > usableAfter ? stored.token : null;
+  } catch {
+    // A token stored by an earlier build was written as a bare string.
+    return tokenExpiry(raw) > usableAfter ? raw : null;
+  }
+}
+
+function clearStoredToken() {
+  try {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // Nothing to clear when storage is unavailable.
+  }
+}
+
+// The stored token is only a fallback: whenever the SDK still holds the
+// signed-in user we ask it for a current token, so the app never calls the API
+// with a token that is missing, stale, or already expired.
+async function currentIdToken(forceRefresh = false): Promise<string | null> {
+  const firebaseUser = getApps().length ? getAuth(getApp()).currentUser : null;
+  if (firebaseUser) {
+    try {
+      const token = await withTimeout(firebaseUser.getIdToken(forceRefresh), 8_000, "Firebase token retrieval timed out.");
+      writeStoredToken(token);
+      return token;
+    } catch (error) {
+      console.warn("Firebase token retrieval:", error);
+    }
+  }
+  return forceRefresh ? null : readStoredToken();
+}
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}, retry = true): Promise<Response> {
+  const token = await currentIdToken();
+  const send = (value: string | null) => {
+    const headers = new Headers(init.headers);
+    if (value) headers.set("Authorization", `Bearer ${value}`);
+    return fetch(input, { ...init, headers });
+  };
+  const response = await send(token);
+  if (response.status === 401 && retry) {
+    // The session may have expired mid-use: force one refresh, then retry once.
+    const refreshed = await currentIdToken(true).catch(() => null);
+    if (refreshed && refreshed !== token) return send(refreshed);
+  }
+  return response;
 }
 
 function AuthGate() {
@@ -119,7 +195,7 @@ function AuthGate() {
           void (async () => {
             try {
               const idToken = await withTimeout(firebaseUser.getIdToken(), 8_000, "Firebase token retrieval timed out.");
-              localStorage.setItem("laundryai_firebase_token", idToken);
+              writeStoredToken(idToken);
               if (firebaseConfig.databaseURL) {
                 void withTimeout(set(ref(getDatabase(app), `users/${firebaseUser.uid}/profile`), {
                   email: firebaseUser.email || "",
@@ -236,8 +312,10 @@ function AuthGate() {
 
   const handleSignOut = async () => {
     if (getApps().length) await signOut(getAuth(getApp()));
-    localStorage.removeItem("laundryai_firebase_token");
+    clearStoredToken();
     sessionStorage.removeItem(AUTH_SESSION_KEY);
+    setVerificationPending(false);
+    setAuthNotice("");
     setUser(null);
   };
 
@@ -707,6 +785,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<Prediction | undefined>();
   const [history, setHistory] = useState<Prediction[]>([]);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const [analytics, setAnalytics] = useState<Analytics | undefined>();
   const [datasetStats, setDatasetStats] = useState<DatasetStats | undefined>();
   const [modelMetrics, setModelMetrics] = useState<any>(null);
@@ -752,21 +831,37 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
   const load = async () => {
     try {
-      setHistory(await apiFetch(`${API}/history`).then((x) => x.json()));
-      setAnalytics(await apiFetch(`${API}/analytics`).then((x) => x.json()));
-      const statsRes = await apiFetch(`${API}/dataset/stats`);
-      if (statsRes.ok) {
-        setDatasetStats(await statsRes.json());
+      const [historyResponse, analyticsResponse] = await Promise.all([
+        apiFetch(`${API}/history`).catch(() => null),
+        apiFetch(`${API}/analytics`).catch(() => null),
+      ]);
+      // A rejected session must never be written into state: an error payload is
+      // an object, and rendering it as scan history used to blank the whole app.
+      if (historyResponse?.status === 401 || analyticsResponse?.status === 401) {
+        setSessionExpired(true);
+      } else if (historyResponse?.ok || analyticsResponse?.ok) {
+        setSessionExpired(false);
       }
-      const metricsRes = await apiFetch(`${API}/model/metrics`);
-      if (metricsRes.ok) {
-        const m = await metricsRes.json();
-        if (m.available && m.metrics) {
-          setModelMetrics(m.metrics);
-        }
+      if (historyResponse?.ok) {
+        const records = await historyResponse.json().catch(() => null);
+        if (Array.isArray(records)) setHistory(records);
+      }
+      if (analyticsResponse?.ok) {
+        const summary = await analyticsResponse.json().catch(() => null);
+        if (summary && typeof summary === "object" && !Array.isArray(summary)) setAnalytics(summary);
+      }
+      const statsRes = await apiFetch(`${API}/dataset/stats`).catch(() => null);
+      if (statsRes?.ok) {
+        const stats = await statsRes.json().catch(() => null);
+        if (stats) setDatasetStats(stats);
+      }
+      const metricsRes = await apiFetch(`${API}/model/metrics`).catch(() => null);
+      if (metricsRes?.ok) {
+        const m = await metricsRes.json().catch(() => null);
+        if (m?.available && m.metrics) setModelMetrics(m.metrics);
       }
     } catch {
-      // Background load fallback
+      // The backend may be asleep or offline. Keep whatever is already on screen.
     }
   };
 
@@ -787,7 +882,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         apiFetch(`${API}/admin/feedback`).catch(() => null),
         apiFetch(`${API}/admin/users`).catch(() => null),
         apiFetch(`${API}/admin/scans`).catch(() => null),
-        apiFetch(`${API}/admin/audit`).catch(() => null),
+        apiFetch(`${API}/admin/audit-log`).catch(() => null),
       ]);
       const nextErrors: Record<string, string> = {};
       if (healthResponse?.ok) setAdminHealth(await healthResponse.json());
@@ -1052,8 +1147,10 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       );
       const data = (await response.json()) as Prediction;
       if (!response.ok) {
+        if (response.status === 401) setSessionExpired(true);
         throw data;
       }
+      setSessionExpired(false);
       setResult(data);
       if (data.persistence_warning) {
         setStatus(`Analysis complete. (${data.persistence_warning})`);
@@ -1088,7 +1185,12 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           was_prediction_correct: wasCorrect
         })
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({} as { message?: string; detail?: string }));
+      if (!response.ok) {
+        if (response.status === 401) setSessionExpired(true);
+        setFeedbackMessage(typeof data?.detail === "string" ? data.detail : "Feedback could not be submitted right now. Try again shortly.");
+        return;
+      }
       setFeedbackSubmitted(true);
       setIsSelectingCorrection(false);
       setFeedbackMessage(data.message || `Submitted ${confirmedFabric.toUpperCase()} for administrator review.`);
@@ -1197,6 +1299,12 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
   return (
     <>
+      {sessionExpired && (
+        <div className="session-expired" role="alert">
+          <span><strong>Your sign-in session was rejected.</strong> History and analysis are paused until you sign in again.</span>
+          <button type="button" onClick={() => void onSignOut()}>Sign in again</button>
+        </div>
+      )}
       {/* Top Navigation Bar */}
       <header className="app-header">
         <button className="brand-logo" onClick={() => setPage("home")}>
@@ -1500,7 +1608,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       🔄 Switch Camera
                     </button>
                   </div>
-                </MotionDiv>
+                </div>
               )}
 
               {/* Drop Zone — hidden while camera is open */}
@@ -1689,7 +1797,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       <span>{analysisStep > 4 ? "✓" : "◉"}</span> Confidence gating & knowledge base care mapping
                     </div>
                   </div>
-                </div>
+                </MotionDiv>
               )}
 
               {/* Status Banner */}
@@ -2175,7 +2283,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             {/* Model Confidence Histogram */}
             <div className="chart-card">
               <h3>Confidence Distribution Histogram</h3>
-              {history.length ? (
+              {Array.isArray(history) && history.length ? (
                 (() => {
                   const buckets = [
                     { range: "80–100%", count: history.filter((h) => h.confidence >= 80).length },
@@ -2722,4 +2830,44 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   );
 }
 
-createRoot(document.getElementById("root")!).render(<AuthGate />);
+/**
+ * React unmounts the whole tree when a render throws, which leaves a blank
+ * white page with no explanation. This boundary keeps a recoverable message on
+ * screen instead, so one unexpected value can never hide the whole application.
+ */
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("LaundryAI interface error:", error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="crash-shell" role="alert">
+        <div className="crash-panel">
+          <span className="eyebrow">UNEXPECTED INTERFACE ERROR</span>
+          <h1>The workspace could not finish rendering.</h1>
+          <p className="crash-detail">{this.state.error.message || "An unknown rendering error occurred."}</p>
+          <div className="crash-actions">
+            <button type="button" className="btn btn-primary" onClick={() => this.setState({ error: null })}>Try again</button>
+            <button type="button" className="btn btn-outline" onClick={() => window.location.reload()}>Reload the app</button>
+          </div>
+          <small>Your sign-in is preserved. If this repeats, send the message above to the administrator.</small>
+        </div>
+      </main>
+    );
+  }
+}
+
+createRoot(document.getElementById("root")!).render(
+  <AppErrorBoundary>
+    <AuthGate />
+  </AppErrorBoundary>,
+);
+
