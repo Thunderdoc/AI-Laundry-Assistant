@@ -477,6 +477,26 @@ class TestLaundryAIAPI(unittest.TestCase):
         self.assertEqual(audit.json()["count"], 1)
         self.assertEqual(audit.json()["items"][0]["action"], "admin_role_updated")
 
+    def test_24_firebase_history_cache_invalidates_on_writes(self):
+        from app import main
+        row = {"id": 1, "owner_uid": "u1", "fabric": "cotton", "confidence": 90,
+               "created_at": "2026-01-01T00:00:00Z"}
+        with patch.object(main.firebase_store, "enabled", return_value=True), \
+             patch.object(main.firebase_store, "configured", return_value=True), \
+             patch.object(main.firebase_store, "list_predictions", return_value=[row]) as mock_list:
+            main._invalidate_history_cache()
+            # First read fetches from Firebase once…
+            self.assertEqual(main.saved_history(), [row])
+            # …and owner-scoped reads within the TTL reuse the cached rows.
+            self.assertEqual(main.saved_history("u1")[0]["id"], 1)
+            self.assertEqual(main.saved_history("other"), [])
+            mock_list.assert_called_once()
+            # A write must invalidate the cache so the next read re-fetches.
+            main._invalidate_history_cache()
+            main.saved_history()
+            self.assertEqual(mock_list.call_count, 2)
+            main._invalidate_history_cache()
+
 class TestFirebaseTokenVerification(unittest.TestCase):
     """ID-token verification must work without a per-request call to Google.
 

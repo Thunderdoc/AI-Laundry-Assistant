@@ -194,6 +194,33 @@ From SaaS dashboard design research (f1studioz, designstudiouiux, orbix, tailadm
 
 ---
 
+## 6b. Implementation status (2026-09-18)
+
+| Phase | Item | Status |
+|---|---|---|
+| 1 | Admin console redesign (4 tabs, 4 KPIs, status bar, footer links) | ✅ Done (commit `078f4a9`) |
+| 2 | My Scans history page: search, confidence filters, note editing, per-item delete, Export CSV, Clear all | ✅ Done (`HistoryPage`) |
+| 2 | Care Symbol Reference (ISO 3758, static) in Care Guide | ✅ Done (`CareSymbols` + `CARE_SYMBOLS`) |
+| 2 | About page database claim corrected | ✅ Done |
+| 3 | Lazy per-tab admin loading (Firebase user directory fetched only when the Users tab opens) | ✅ Done (`AdminConsole`) |
+| 3 | Frontend component split: `lib.ts`, `data.tsx`, `i18n.tsx`, `components/{AdminConsole,HistoryPage,CareAssistant,CareSymbols}.tsx`; `main.tsx` 2,873 → ~2,150 lines | ✅ Done |
+| 3 | Backend scale fix: TTL cache (15 s, `HISTORY_CACHE_TTL`) for the Firebase predictions fetch shared by all admin aggregation endpoints, invalidated on every write (predict/feedback/note/delete/clear); SQLite path stays uncached (tests write to it directly) | ✅ Done + new test `test_24` |
+| 3 | `non_fabric` class rebalance (46 → 300+ negatives) | ⏸ Needs real image collection (objects, rooms, labels, people) — not fabricated. Data pipeline (`train.py`, release gate) is ready for it. |
+| 4 | Care assistant (bring-your-own-key, any OpenAI-compatible endpoint; key stored locally in browser only) | ✅ Done (`CareAssistant`) |
+| 4 | Wardrobe favorites + care reminders (localStorage, no API) | ✅ Done (in `HistoryPage`) |
+| 4 | Smart wash-load planner (rule-based: strictest temperature wins, delicates split out, detergent estimate) | ✅ Done (in `HistoryPage`) |
+| 4 | °C / °F display toggle (header; applied to care cards, library spec, dosing tip, copied profile) | ✅ Done |
+| 4 | i18n UI chrome EN/ES/DE/FR (header language switcher; persisted locally) | ✅ Done (`i18n.tsx`) |
+| 4 | Care-label **OCR** symbol decoder | ⏸ Needs a trained label-reading model (OCR + symbol classification) and label data — deliberately not faked. Static symbol reference ships meanwhile. |
+| 4 | Stain-type **detection** model | ⏸ Needs a new stain-classification model + dataset. Static per-fabric stain guide ships meanwhile. |
+| 4 | Push notifications / wash-cycle reminders | ⏸ Web Push needs a service worker + VAPID + server changes (deployment risk) — kept out of scope on purpose. In-browser reminders ship instead. |
+
+**Verification:** frontend `tsc -b && vite build` green; backend suite green for every test runnable without a trained torch model (27 passed; the 5 model-inference tests require the `.pt` artifact + torch, which this sandbox cannot install — unchanged behavior, write paths only gained cache invalidation).
+
+**Honest boundary:** OCR, stain detection, and push notifications require new models, datasets, or server-side infrastructure. Everything that could be shipped honestly over the existing API/deployment was shipped; the rest is listed here as future work rather than simulated.
+
+---
+
 ## 7. Risks & rollback
 
 | Risk | Mitigation |
