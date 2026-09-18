@@ -803,7 +803,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [reviewFilter, setReviewFilter] = useState<"all" | "corrected" | "confirmed">("all");
   const [userQuery, setUserQuery] = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
-  const [adminTab, setAdminTab] = useState<"operations" | "overview" | "review" | "feedback" | "users" | "model" | "reference">("operations");
+  const [adminTab, setAdminTab] = useState<"overview" | "review" | "users" | "model">("overview");
   const [adminRefreshKey, setAdminRefreshKey] = useState(0);
   const [adminLastUpdated, setAdminLastUpdated] = useState<string>("");
   const [selectedFabricKey, setSelectedFabricKey] = useState<string>("cotton");
@@ -2455,116 +2455,130 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
       {page === "admin" && user.is_admin && (
         <main className="admin-page">
-          <div className="admin-command-bar"><span><i /> LaundryAI administration</span><small>Protected operations workspace</small><strong>{adminOverview?.model_ready ? "Inference online" : "Operations ready"}</strong></div>
-          <section className="admin-hero">
-            <div>
-              <span className="eyebrow">ADMIN CONTROL CENTER</span>
-              <h1><TextEffect>Operate the platform.</TextEffect></h1>
-              <p>Monitor production, review every correction, manage access, and release validated models from one workspace.</p>
+          {/* Status bar: one glance answers "is the platform healthy?" */}
+          <div className="admin-topbar">
+            <div className="admin-topbar-id">
+              <span className="admin-topbar-mark" aria-hidden>🧺</span>
+              <div>
+                <b>Administration</b>
+                <small>{user.email || user.name} · Verified administrator</small>
+              </div>
             </div>
-            <div className="admin-identity"><span>VERIFIED ADMINISTRATOR</span><strong>{user.email}</strong><small>{adminLastUpdated ? `Last synchronized ${adminLastUpdated}` : "Waiting for first sync"}</small><button type="button" disabled={adminLoading} onClick={() => setAdminRefreshKey((value) => value+1)}>{adminLoading ? "Refreshing…" : "↻ Refresh all data"}</button></div>
-          </section>
+            <div className="admin-status-pills" role="status">
+              <span className={`admin-status-pill ${adminOverview?.model_ready ? "ok" : "warn"}`}>
+                <i aria-hidden /> Inference: {adminOverview == null ? "checking" : adminOverview.model_ready ? "online" : "down"}
+              </span>
+              <span className={`admin-status-pill ${adminHealth?.status === "ok" ? "ok" : adminHealth ? "warn" : "pending"}`}>
+                <i aria-hidden /> API: {adminHealth?.status || "checking"}
+              </span>
+              <span className="admin-status-pill pending">
+                <i aria-hidden /> Data: {adminOverview?.persistence?.backend === "firebase" ? "Firebase cloud" : "Local"}
+              </span>
+            </div>
+            <div className="admin-topbar-sync">
+              <small>{adminLastUpdated ? `Synced ${adminLastUpdated}` : "Waiting for first sync"}</small>
+              <button type="button" disabled={adminLoading} onClick={() => setAdminRefreshKey((value) => value + 1)}>
+                {adminLoading ? "Refreshing…" : "↻ Refresh"}
+              </button>
+            </div>
+          </div>
 
-          <div className="admin-console-shell">
-            <aside className="admin-command-rail">
-              <div className="admin-rail-heading"><span>Workspace</span><small>Choose an operational area</small></div>
-              <nav className="admin-tabs" aria-label="Admin operations" role="tablist">
-                {[
-                  ['operations', 'Operations', 'Service health & dataset stats', '⚡'],
-                  ['review', `Review · ${adminFeedback.length}`, 'Approve corrections & scan logs', '👁️'],
-                  ['model', 'Model Release', 'Train, evaluate & promote', '🧠'],
-                  ['users', `Users · ${adminUsers.length}`, 'Roles & access control', '👥'],
-                  ['reference', 'Reference', 'Runbook & service links', '📖']
-                ].map(([key, label, description, icon], index) => {
-                  const isActive = adminTab === key || (key === 'operations' && adminTab === 'overview') || (key === 'review' && adminTab === 'feedback');
-                  return (
-                    <button
-                      type="button"
-                      key={key}
-                      className={isActive ? "active" : ""}
-                      role="tab"
-                      aria-selected={isActive}
-                      tabIndex={isActive ? 0 : -1}
-                      onClick={() => setAdminTab(key as any)}
-                    >
-                      <b>0{index + 1}</b>
-                      <span>{icon} {label}<small>{description}</small></span>
-                    </button>
-                  );
-                })}
-              </nav>
-              <div className="admin-rail-footer"><span className={adminOverview?.model_ready ? "online" : "pending"} /><div><b>Inference API</b><small>{adminOverview?.model_ready ? "Operational" : "Checking connection"}</small></div></div>
-            </aside>
-            <MotionPanel panelKey={`${adminTab}-${adminRefreshKey}`} className={`admin-command-main ${adminLoading ? "is-refreshing" : ""}`}>
-              {adminMessage && <div className="admin-alert">{adminMessage}</div>}
-              {Object.keys(adminErrors).length > 0 && (
-                <div className="admin-inline-error" role="alert">
-                  <b>Some admin data is unavailable</b>
-                  <span>{Object.entries(adminErrors).map(([area, message]) => `${area}: ${message}`).join(" ")}</span>
-                  <button type="button" className="btn btn-outline" onClick={() => setAdminRefreshKey((value) => value + 1)}>Retry</button>
+          {/* Four tabs — the entire console */}
+          <nav className="admin-tabs-minimal" role="tablist" aria-label="Admin sections">
+            {([
+              ["overview", "Overview"],
+              ["review", adminFeedback.length ? `Review · ${adminFeedback.length}` : "Review"],
+              ["users", adminUsers.length ? `Users · ${adminUsers.length}` : "Users"],
+              ["model", "Model"],
+            ] as const).map(([key, label]) => (
+              <button
+                type="button"
+                key={key}
+                role="tab"
+                aria-selected={adminTab === key}
+                tabIndex={adminTab === key ? 0 : -1}
+                className={adminTab === key ? "active" : ""}
+                onClick={() => setAdminTab(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+
+          <MotionPanel panelKey={`${adminTab}-${adminRefreshKey}`} className={`admin-command-main ${adminLoading ? "is-refreshing" : ""}`}>
+            {adminMessage && <div className="admin-alert">{adminMessage}</div>}
+            {Object.keys(adminErrors).length > 0 && (
+              <div className="admin-inline-error" role="alert">
+                <b>Some admin data is unavailable</b>
+                <span>{Object.entries(adminErrors).map(([area, message]) => `${area}: ${message}`).join(" ")}</span>
+                <button type="button" className="btn btn-outline" onClick={() => setAdminRefreshKey((value) => value + 1)}>Retry</button>
+              </div>
+            )}
+
+            {adminTab === "overview" && (
+              <>
+                {/* 4 KPIs only — the first one is the action the admin most often needs */}
+                <section className="admin-kpi-grid" aria-label="Key numbers">
+                  <button type="button" className={`admin-kpi ${adminFeedback.length ? "attention" : ""}`} onClick={() => setAdminTab("review")}>
+                    <span>Pending reviews</span>
+                    <b>{adminPanelLoading.feedback ? "…" : adminFeedback.length}</b>
+                    <small>{adminFeedback.length ? "Awaiting your approval →" : "Queue is clear"}</small>
+                  </button>
+                  <div>
+                    <span>Total scans</span>
+                    <b>{adminPanelLoading.overview ? "…" : adminOverview?.total_scans ?? "—"}</b>
+                    <small>Recorded analyses</small>
+                  </div>
+                  <div>
+                    <span>Active users</span>
+                    <b>{adminPanelLoading.users ? "…" : adminUsers.length || "—"}</b>
+                    <small>Firebase accounts</small>
+                  </div>
+                  <div>
+                    <span>Dataset samples</span>
+                    <b>{adminPanelLoading.overview ? "…" : adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b>
+                    <small>Across supported classes</small>
+                  </div>
+                </section>
+
+                <div className="admin-overview-grid">
+                  <section className="admin-panel-card">
+                    <div className="admin-section-heading">
+                      <div><span className="admin-eyebrow">ACTIVITY</span><h2>Scans this week</h2></div>
+                      <span className="admin-count">{adminScans.length ? "Last 7 days" : "No scan data"}</span>
+                    </div>
+                    {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan activity…</p> : adminScans.length ? <div className="admin-trend" aria-label="Seven day scan activity">
+                      {trendDays.map((day) => <div className="admin-trend-day" key={day.key}><strong>{day.count}</strong><div className="admin-trend-bar"><i style={{ height: `${Math.max(8, day.count / trendMax * 100)}%` }} /></div><small>{day.label}</small></div>)}
+                    </div> : <p className="admin-empty">Scan activity will appear after the API records scans.</p>}
+                  </section>
+
+                  <section className="admin-panel-card">
+                    <div className="admin-section-heading">
+                      <div><span className="admin-eyebrow">DATASET</span><h2>Class balance</h2></div>
+                      <span className="admin-count">{adminOverview?.dataset?.total_samples ?? 0} samples</span>
+                    </div>
+                    <div className="admin-dataset-grid">
+                      {Object.entries(adminOverview?.dataset?.classes || {}).map(([label, value]: [string, any]) => {
+                        const maximum = Math.max(1, ...Object.values(adminOverview?.dataset?.classes || {}).map((item: any) => Number(item.total) || 0));
+                        return <div className="admin-dataset-row" key={label}><span>{label.replace("_", " ")}</span><div><i style={{ width: `${Math.max(3, (Number(value.total) || 0) / maximum * 100)}%` }} /></div><b>{value.total}</b><small>{value.user_verified} reviewed</small></div>;
+                      })}
+                    </div>
+                  </section>
                 </div>
-              )}
 
-          {(adminTab === "operations" || adminTab === "overview") && <>
-          <section className="admin-stats-grid">
-            <div><span>Total scans</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.total_scans ?? "—"}</b><small>Recorded analyses</small></div>
-            <div><span>Active users</span><b>{adminPanelLoading.users ? "…" : adminUsers.length || "—"}</b><small>Firebase accounts</small></div>
-            <div><span>Pending reviews</span><b>{adminPanelLoading.feedback ? "…" : adminFeedback.length}</b><small>Corrections awaiting approval</small></div>
-            <div><span>Dataset samples</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.dataset?.total_samples ?? datasetStats?.total_samples ?? "—"}</b><small>Across supported classes</small></div>
-            <div><span>Model status</span><b>{adminPanelLoading.overview ? "…" : adminOverview?.model_ready == null ? "—" : adminOverview.model_ready ? "Ready" : "Blocked"}</b><small>Live inference availability</small></div>
-            <div><span>Audit events</span><b>{adminPanelLoading.audit ? "…" : adminAudit.length || "—"}</b><small>Recorded admin actions</small></div>
-          </section>
-          <section className="admin-trend-panel">
-            <div className="admin-section-heading"><div><span className="eyebrow">ACTIVITY TREND</span><h2>Scans this week</h2></div><span className="admin-count">{adminScans.length ? "Last 7 days" : "No scan data"}</span></div>
-            {adminPanelLoading.scans ? <p className="admin-panel-loading" role="status">Loading scan activity…</p> : adminScans.length ? <div className="admin-trend" aria-label="Seven day scan activity">
-              {trendDays.map((day) => <div className="admin-trend-day" key={day.key}><strong>{day.count}</strong><div className="admin-trend-bar"><i style={{ height: `${Math.max(8, day.count / trendMax * 100)}%` }} /></div><small>{day.label}</small></div>)}
-            </div> : <p className="admin-empty">Scan activity will appear after the API records scans.</p>}
-          </section>
+                <section className="admin-panel-card">
+                  <div className="admin-section-heading">
+                    <div><span className="admin-eyebrow">ACCOUNTABILITY</span><h2>Recent admin activity</h2></div>
+                    <span className="admin-count">{adminAudit.length ? `${adminAudit.length} events` : "No events"}</span>
+                  </div>
+                  {adminPanelLoading.audit ? <p className="admin-panel-loading" role="status">Loading audit history…</p> : adminAudit.length ? <div className="admin-audit-list">
+                    {adminAudit.slice(0, 5).map((entry, index) => <div className="admin-audit-row" key={entry.id || `${entry.action}-${index}`}><span className="admin-audit-icon">↳</span><div><strong>{entry.action || "Administrative event"}</strong><small>{entry.detail || entry.actor || "Recorded by the platform"}{entry.created_at ? ` · ${new Date(entry.created_at).toLocaleString()}` : ""}</small></div></div>)}
+                  </div> : <p className="admin-empty">No admin actions recorded yet.</p>}
+                </section>
+              </>
+            )}
 
-          <section className="admin-health-panel">
-            <div className="admin-section-heading">
-              <div><span className="eyebrow">SYSTEM READINESS</span><h2>Production health</h2></div>
-              <strong className="readiness-score">{adminPanelLoading.health ? "…" : adminHealth ? [
-                adminOverview?.model_ready,
-                adminOverview?.auth?.firebase_project,
-                adminOverview?.auth?.admin_allowlist,
-                adminOverview?.persistence?.backend === "firebase",
-                adminOverview?.persistence?.reachable === true,
-              ].filter(Boolean).length * 20 : "—"}{adminHealth && "%"}</strong>
-            </div>
-            <div className="admin-service-grid">
-              {[
-                ["AI inference", adminOverview?.model_ready, adminOverview?.model_ready ? "TorchScript model loaded" : "Model unavailable"],
-                ["Authentication", adminOverview?.auth?.firebase_project, "Google-signed Firebase tokens"],
-                ["Admin policy", adminOverview?.auth?.admin_allowlist, "Verified email allowlist"],
-                ["Database mode", adminOverview?.persistence?.backend === "firebase", adminOverview?.persistence?.database || "Checking"],
-                ["Cloud connection", adminOverview?.persistence?.reachable === true, adminOverview?.persistence?.reachable === false ? `Blocked: ${adminOverview?.persistence?.error || "configuration"}` : "Database and Storage reachable"],
-              ].map(([label,ok,detail]) => <div className={`admin-service ${ok ? "healthy" : "blocked"}`} key={String(label)}><span>{ok ? "✓" : "!"}</span><div><b>{String(label)}</b><small>{String(detail)}</small></div></div>)}
-            </div>
-          </section>
-
-          <section className="admin-audit-panel">
-            <div className="admin-section-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h2>Recent administrative activity</h2></div><span className="admin-count">{adminAudit.length ? `${adminAudit.length} events` : "No events"}</span></div>
-            {adminPanelLoading.audit ? <p className="admin-panel-loading" role="status">Loading audit history…</p> : adminAudit.length ? <div className="admin-audit-list">
-              {adminAudit.slice(0, 8).map((entry, index) => <div className="admin-audit-row" key={entry.id || `${entry.action}-${index}`}><span className="admin-audit-icon">↳</span><div><strong>{entry.action || "Administrative event"}</strong><small>{entry.detail || entry.actor || "Recorded by the platform"}{entry.created_at ? ` · ${new Date(entry.created_at).toLocaleString()}` : ""}</small></div></div>)}
-            </div> : adminErrors.audit ? <p className="admin-panel-error" role="status">{adminErrors.audit}</p> : <p className="admin-empty">No audit endpoint data is available yet.</p>}
-          </section>
-
-          <section className="admin-review-queue">
-            <div className="admin-section-heading">
-              <div><span className="eyebrow">DATASET OBSERVABILITY</span><h2>Class balance</h2></div>
-              <span className="admin-count">{adminOverview?.dataset?.total_samples ?? 0} samples</span>
-            </div>
-            <div className="admin-dataset-grid">
-              {Object.entries(adminOverview?.dataset?.classes || {}).map(([label,value]: [string, any]) => {
-                const maximum=Math.max(1,...Object.values(adminOverview?.dataset?.classes || {}).map((item:any) => Number(item.total)||0));
-                return <div className="admin-dataset-row" key={label}><span>{label.replace("_"," ")}</span><div><i style={{width:`${Math.max(3,(Number(value.total)||0)/maximum*100)}%`}} /></div><b>{value.total}</b><small>{value.user_verified} reviewed</small></div>;
-              })}
-            </div>
-          </section>
-          </>}
-
-          {adminTab === "model" &&
+{adminTab === "model" &&
           <section className="admin-workspace">
             <div>
               <span className="eyebrow">MODEL DELIVERY / {String(adminOverview?.training_mode || "checking").replace(/_/g," ")}</span>
@@ -2597,7 +2611,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             </div>
           </section>}
 
-          {(adminTab === "review" || adminTab === "feedback") && (
+{adminTab === "review" && (
             <section className="admin-review-queue">
               <div className="admin-section-heading">
                 <div>
@@ -2726,18 +2740,12 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
             )) : <p className="admin-empty">{adminUsers.length ? "No users match this search." : adminErrors.users || "No Firebase users could be loaded."}</p>}
           </section>}
 
-          {adminTab === "reference" && <section className="admin-reference">
-            <div className="admin-section-heading"><div><span className="eyebrow">OPERATIONS REFERENCE</span><h2>Runbook and service endpoints</h2></div><span className="admin-count">Production</span></div>
-            <p className="admin-section-copy">Use these links and checks to diagnose the platform without leaving the control center.</p>
-            <div className="admin-reference-grid">
-              <article><span>01</span><h3>API health</h3><p>Confirm model readiness and Firebase persistence reachability.</p><a href={`${API}/health`} target="_blank" rel="noreferrer">Open health endpoint ↗</a></article>
-              <article><span>02</span><h3>API documentation</h3><p>Inspect request formats and test authorized service endpoints.</p><a href={`${API.replace(/\/api$/,"")}/docs`} target="_blank" rel="noreferrer">Open API docs ↗</a></article>
-              <article><span>03</span><h3>Review workflow</h3><p>User corrections stay pending until an administrator approves or rejects them.</p><button type="button" onClick={() => setAdminTab("review")}>Open review queue →</button></article>
-              <article><span>04</span><h3>Release workflow</h3><p>Only promote a candidate after held-out metrics and regression checks pass.</p><button type="button" onClick={() => setAdminTab("model")}>Open model release →</button></article>
+          
+            <div className="admin-quick-links">
+              <a href={`${API}/health`} target="_blank" rel="noreferrer">API health ↗</a>
+              <a href={`${API.replace(/\/api$/, "")}/docs`} target="_blank" rel="noreferrer">API docs ↗</a>
             </div>
-          </section>}
-            </MotionPanel>
-          </div>
+          </MotionPanel>
         </main>
       )}
 
@@ -2774,8 +2782,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 </div>
                 <div className="care-card">
                   <div className="care-card-icon">💾</div>
-                  <div className="care-card-label">DATABASE</div>
-                  <div className="care-card-value">SQLite3 Engine</div>
+                              <div className="care-card-label">DATABASE</div>
+                              <div className="care-card-value">Firebase RTDB (cloud) · SQLite (local dev)</div>
                 </div>
               </div>
             </div>
