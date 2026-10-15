@@ -2,18 +2,21 @@ import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode 
 import { useReducedMotion } from "motion/react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signOut } from "firebase/auth";
+import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, inMemoryPersistence, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signOut, type Auth } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
 import { MotionButton, MotionDiv, MotionPage, MotionSection, Reveal, TextEffect } from "./motion-primitives";
 import {
   API,
-  AUTH_SESSION_KEY,
   NOTE_MAX_LENGTH,
   apiFetch,
+  clearAuthSession,
   clearStoredToken,
   convertTempText,
   fetchWithTimeout,
+  hasAuthSession,
   readTempUnit,
+  triggerAuthSession,
+  webStorageAvailable,
   writeStoredToken,
   writeTempUnit,
   withTimeout,
@@ -49,6 +52,15 @@ const firebaseWebConfig = {
 const firebaseWebConfigured = Boolean(firebaseWebConfig.apiKey && firebaseWebConfig.authDomain && firebaseWebConfig.projectId && firebaseWebConfig.appId);
 const backendAuthAvailable = Boolean(API);
 
+// Session storage can be unavailable (blocked cookies, in-app webviews).
+// Persisting the session there would make setPersistence/sign-in throw, so
+// fall back to an in-memory session for the lifetime of the page instead.
+function persistSession(auth: Auth) {
+  return setPersistence(auth, webStorageAvailable() ? browserSessionPersistence : inMemoryPersistence).catch(async () => {
+    await setPersistence(auth, inMemoryPersistence).catch(() => undefined);
+  });
+}
+
 function AuthGate() {
   const { t } = useI18n();
   const [user, setUser] = useState<SignedInUser | null>(null);
@@ -64,110 +76,158 @@ function AuthGate() {
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
+    let disposed = false;
+    let authAttached = false;
+    // The API can confirm the account afterwards; browser-side sign-in must not
+    // depend on that round-trip succeeding.
+    let verifyWithBackend = false;
+
+    // Registering the auth-state listener is what actually completes a sign-in
+    // (it is the only thing that calls setUser). It must run for every usable
+    // Firebase config — never only when the backend probe happens to succeed.
+    const attachAuth = async (firebaseConfig: Record<string, string>) => {
+      if (disposed || authAttached || !firebaseConfig) return;
+      authAttached = true;
+      const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+      await persistSession(auth);
+      if (disposed) return;
+      let rejectRestoredAccount = !hasAuthSession();
+      unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+        void (async () => {
+          try {
+            if (!firebaseUser) {
+              clearStoredToken();
+              setUser(null);
+              return;
+            }
+            if (rejectRestoredAccount && !hasAuthSession()) {
+              rejectRestoredAccount = false;
+              await signOut(auth);
+              setAuthNotice("Choose the Google or email account you want to use for this session.");
+              return;
+            }
+            const passwordAccount = firebaseUser.providerData.some((provider) => provider.providerId === "password");
+            if (passwordAccount && !firebaseUser.emailVerified) {
+              setVerificationPending(true);
+              setAuthNotice("You can continue now. Verify your email when it arrives to secure account recovery and administrator access.");
+            } else {
+              setVerificationPending(false);
+            }
+            const localAccount: SignedInUser = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || "",
+              name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
+              picture: firebaseUser.photoURL,
+              is_admin: false,
+            };
+            // Enter the application immediately with zero waiting
+            setUser(localAccount);
+
+            // Asynchronously retrieve the fresh ID token and verify admin privileges in background
+            void (async () => {
+              try {
+                const idToken = await withTimeout(firebaseUser.getIdToken(), 8_000, "Firebase token retrieval timed out.");
+                writeStoredToken(idToken);
+                if (firebaseConfig.databaseURL) {
+                  void withTimeout(set(ref(getDatabase(app), `users/${firebaseUser.uid}/profile`), {
+                    email: firebaseUser.email || "",
+                    name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
+                    lastLoginAt: new Date().toISOString(),
+                  }), 4_000, "Profile sync timed out.").catch(() => undefined);
+                }
+                if (verifyWithBackend) {
+                  const verified = await fetchWithTimeout(`${API}/auth/firebase`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ id_token: idToken }),
+                  }, 10_000);
+                  if (verified.ok) {
+                    // Never replace the working local account with a partial
+                    // payload: a malformed 200 body used to crash the workspace
+                    // on render (user.name.charAt).
+                    const account = await verified.json().catch(() => null);
+                    const validAccount = account && typeof account === "object" && typeof (account as SignedInUser).uid === "string" && (account as SignedInUser).uid;
+                    if (validAccount) {
+                      const verifiedAccount = account as SignedInUser;
+                      setUser({
+                        uid: verifiedAccount.uid,
+                        email: typeof verifiedAccount.email === "string" ? verifiedAccount.email : localAccount.email,
+                        name: (typeof verifiedAccount.name === "string" && verifiedAccount.name) ? verifiedAccount.name : localAccount.name,
+                        picture: typeof verifiedAccount.picture === "string" ? verifiedAccount.picture : localAccount.picture,
+                        is_admin: verifiedAccount.is_admin === true,
+                      });
+                    }
+                  }
+                }
+              } catch (error) {
+                console.warn("Background authentication sync:", error);
+              }
+            })();
+          } catch (error) {
+            // A failure here must never strand a signed-in user outside the app.
+            console.warn("Authentication state sync:", error);
+          }
+        })();
+      });
+    };
+
     void (async () => {
-      try {
-        let config: FirebaseSettings = firebaseWebConfigured ? { enabled: true, firebase_config: firebaseWebConfig } : { enabled: false, firebase_config: null };
-        let verifyWithBackend = false;
-        if (backendAuthAvailable) {
-          const response = await fetch(`${API}/auth/config`);
+      const envConfig: FirebaseSettings = firebaseWebConfigured ? { enabled: true, firebase_config: firebaseWebConfig } : { enabled: false, firebase_config: null };
+      let config = envConfig;
+      // Sign-in must stay usable while (and after) the API is unreachable:
+      // initialize with the bundled web config first, then upgrade.
+      if (firebaseWebConfigured && config.firebase_config) {
+        setSettings(config);
+        await attachAuth(config.firebase_config);
+      }
+      if (backendAuthAvailable) {
+        try {
+          const response = await fetchWithTimeout(`${API}/auth/config`, {}, 8_000);
           if (response.ok) {
             const backendConfig = await response.json() as FirebaseSettings;
-            if (backendConfig.enabled && backendConfig.firebase_config) {
+            const backendWebConfig = backendConfig.firebase_config;
+            if (backendConfig.enabled && backendWebConfig) {
               config = backendConfig;
               verifyWithBackend = true;
+              if (!firebaseWebConfigured) {
+                setSettings(config);
+                await attachAuth(backendWebConfig);
+              }
             }
+          }
+        } catch {
+          // A sleeping backend, blocked CORS, or a dropped connection must not
+          // disable sign-in. Keep the browser-side session fully functional.
+          if (firebaseWebConfigured) {
+            setAuthNotice("Sign-in is available. The AI service is reconnecting.");
           }
         }
-        setSettings(config);
-        if (!config.enabled || !config.firebase_config) return;
-        const firebaseConfig = config.firebase_config;
-        const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        await setPersistence(auth, browserSessionPersistence);
-        let rejectRestoredAccount = sessionStorage.getItem(AUTH_SESSION_KEY) !== "1";
-        unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-          if (!firebaseUser) {
-            localStorage.removeItem("laundryai_firebase_token");
-            setUser(null);
-            return;
-          }
-          if (rejectRestoredAccount && sessionStorage.getItem(AUTH_SESSION_KEY) !== "1") {
-            rejectRestoredAccount = false;
-            await signOut(auth);
-            setAuthNotice("Choose the Google or email account you want to use for this session.");
-            return;
-          }
-          const passwordAccount=firebaseUser.providerData.some((provider) => provider.providerId === "password");
-          if (passwordAccount && !firebaseUser.emailVerified) {
-            setVerificationPending(true);
-            setAuthNotice("You can continue now. Verify your email when it arrives to secure account recovery and administrator access.");
-          } else {
-            setVerificationPending(false);
-          }
-          const localAccount: SignedInUser = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || "",
-            name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
-            picture: firebaseUser.photoURL,
-            is_admin: false,
-          };
-          // Enter the application immediately with zero waiting
-          setUser(localAccount);
-
-          // Asynchronously retrieve the fresh ID token and verify admin privileges in background
-          void (async () => {
-            try {
-              const idToken = await withTimeout(firebaseUser.getIdToken(), 8_000, "Firebase token retrieval timed out.");
-              writeStoredToken(idToken);
-              if (firebaseConfig.databaseURL) {
-                void withTimeout(set(ref(getDatabase(app), `users/${firebaseUser.uid}/profile`), {
-                  email: firebaseUser.email || "",
-                  name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "LaundryAI user",
-                  lastLoginAt: new Date().toISOString(),
-                }), 4_000, "Profile sync timed out.").catch(() => undefined);
-              }
-              if (verifyWithBackend) {
-                const verified = await fetchWithTimeout(`${API}/auth/firebase`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ id_token: idToken }),
-                }, 10_000);
-                if (verified.ok) {
-                  const account = await verified.json();
-                  setUser(account);
-                }
-              }
-            } catch (error) {
-              console.warn("Background authentication sync:", error);
-            }
-          })();
-        });
-      } catch {
-        // A sleeping or temporarily unreachable backend must not make working
-        // browser-side Firebase sign-in disappear. Backend-protected features
-        // will remain unavailable until the API reconnects.
-        setSettings(firebaseWebConfigured
-          ? { enabled: true, firebase_config: firebaseWebConfig }
-          : { enabled: false, firebase_config: null });
-        setAuthNotice(firebaseWebConfigured ? "Sign-in is available. The AI service is reconnecting." : "Firebase setup is incomplete.");
+      }
+      if (disposed) return;
+      if (!config.enabled || !config.firebase_config) {
+        setSettings((current) => current ?? { enabled: false, firebase_config: null });
+        if (!firebaseWebConfigured) setAuthNotice("Firebase setup is incomplete.");
       }
     })();
-    return () => unsubscribe?.();
+    return () => { disposed = true; unsubscribe?.(); };
   }, []);
 
   const handleGoogleLogin = async () => {
     if (!settings?.firebase_config) return;
     setAuthError("");
     setIsSigningIn(true);
+    const hadExplicitSession = hasAuthSession();
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
-      const auth=getAuth(app);
-      await setPersistence(auth,browserSessionPersistence);
-      const provider=new GoogleAuthProvider();
-      provider.setCustomParameters({prompt:"select_account"});
-      sessionStorage.setItem(AUTH_SESSION_KEY,"1");
+      const auth = getAuth(app);
+      await persistSession(auth);
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      triggerAuthSession();
       await signInWithPopup(auth, provider);
     } catch (error) {
+      if (!hadExplicitSession) clearAuthSession();
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Google sign-in was cancelled or failed.");
     } finally {
       setIsSigningIn(false);
@@ -179,11 +239,12 @@ function AuthGate() {
     if (!settings?.firebase_config) return;
     setAuthError("");
     setIsSigningIn(true);
+    const hadExplicitSession = hasAuthSession();
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
       const auth = getAuth(app);
-      await setPersistence(auth,browserSessionPersistence);
-      sessionStorage.setItem(AUTH_SESSION_KEY,"1");
+      await persistSession(auth);
+      triggerAuthSession();
       if (isRegistering) {
         const credential=await createUserWithEmailAndPassword(auth, email.trim(), password);
         setVerificationPending(true);
@@ -196,6 +257,7 @@ function AuthGate() {
       }
       else await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (error) {
+      if (!hadExplicitSession) clearAuthSession();
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Email sign-in failed.");
     } finally {
       setIsSigningIn(false);
@@ -236,7 +298,7 @@ function AuthGate() {
   const handleSignOut = async () => {
     if (getApps().length) await signOut(getAuth(getApp()));
     clearStoredToken();
-    sessionStorage.removeItem(AUTH_SESSION_KEY);
+    clearAuthSession();
     setVerificationPending(false);
     setAuthNotice("");
     setUser(null);

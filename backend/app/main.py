@@ -24,7 +24,18 @@ known_origins={
     "https://ai-laundry-assistant-thunderdoc.vercel.app",
     "https://ai-laundry-assistant-psi.vercel.app",
 }
-app.add_middleware(CORSMiddleware, allow_origins=sorted(configured_origins | known_origins), allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=sorted(configured_origins | known_origins),
+    # Branch previews (Vercel) and sandboxes serve from generated hostnames that
+    # cannot be enumerated ahead of time. A CORS-blocked `/api/auth/config`
+    # makes the browser treat the API as unreachable and used to leave sign-in
+    # hanging, so accept the provider's generated hosts as well.
+    allow_origin_regex=r"https://[a-z0-9-]+\.(vercel\.app|e2b\.app)",
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
 Image.MAX_IMAGE_PIXELS=20_000_000
 
 _rate_events: dict[str, deque[float]] = defaultdict(deque)
@@ -437,10 +448,14 @@ def firebase_auth_config():
 @app.post("/api/auth/firebase")
 def firebase_login(payload: FirebaseCredential):
     user = verify_firebase_token(payload.id_token)
+    # Some verified accounts (phone-only, anonymous upgrades) carry no email
+    # claim; resolving the display name must never 500 on a valid sign-in.
+    email = user.get("email") or ""
+    name = user.get("name") or (email.split("@")[0] if email else "") or "LaundryAI user"
     return {
         "uid": user.get("uid"),
-        "email": user.get("email"),
-        "name": user.get("name") or user.get("email", "LaundryAI user").split("@")[0],
+        "email": email,
+        "name": name,
         "picture": user.get("picture"),
         "is_admin": is_admin(user),
     }

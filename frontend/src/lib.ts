@@ -207,12 +207,36 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {},
   return response;
 }
 
+// Storage can throw outright in privacy-restricted browsers (blocked cookies,
+// some in-app webviews). The explicit-login flag therefore keeps an in-memory
+// fallback so sign-in can still complete when sessionStorage is unavailable.
+let memoryAuthSession = false;
+
 export function triggerAuthSession() {
+  memoryAuthSession = true;
   try { sessionStorage.setItem(AUTH_SESSION_KEY, "1"); } catch { /* ignore */ }
 }
 
 export function clearAuthSession() {
+  memoryAuthSession = false;
   try { sessionStorage.removeItem(AUTH_SESSION_KEY); } catch { /* ignore */ }
+}
+
+export function hasAuthSession(): boolean {
+  if (memoryAuthSession) return true;
+  try { return sessionStorage.getItem(AUTH_SESSION_KEY) === "1"; } catch { return false; }
+}
+
+/** True when the browser allows Web Storage writes (it may not, and that must never abort sign-in). */
+export function webStorageAvailable(): boolean {
+  try {
+    const probe = "__laundryai_probe__";
+    sessionStorage.setItem(probe, "1");
+    sessionStorage.removeItem(probe);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

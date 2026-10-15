@@ -497,6 +497,31 @@ class TestLaundryAIAPI(unittest.TestCase):
             self.assertEqual(mock_list.call_count, 2)
             main._invalidate_history_cache()
 
+    def test_25_cors_accepts_generated_preview_hosts(self):
+        # Branch previews get generated hostnames (ai-laundry-assistant-git-…vercel.app).
+        # When /api/auth/config is CORS-blocked there the browser treats the API
+        # as unreachable and the login screen can never finish connecting.
+        preview = "https://ai-laundry-assistant-git-login-fix-a1b2c3-thunderdoc.vercel.app"
+        response = self.client.options(
+            "/api/auth/config",
+            headers={"Origin": preview, "Access-Control-Request-Method": "GET"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), preview)
+        # Known production origins keep working…
+        production = "https://ai-laundry-assistant-thunderdoc.vercel.app"
+        response = self.client.options(
+            "/api/auth/config",
+            headers={"Origin": production, "Access-Control-Request-Method": "GET"},
+        )
+        self.assertEqual(response.headers.get("access-control-allow-origin"), production)
+        # …while unrelated origins are still refused.
+        response = self.client.options(
+            "/api/auth/config",
+            headers={"Origin": "https://evil.example.com", "Access-Control-Request-Method": "GET"},
+        )
+        self.assertNotEqual(response.headers.get("access-control-allow-origin"), "https://evil.example.com")
+
 class TestFirebaseTokenVerification(unittest.TestCase):
     """ID-token verification must work without a per-request call to Google.
 
@@ -582,19 +607,23 @@ class TestFirebaseTokenVerification(unittest.TestCase):
 
         return patch.object(main.urlrequest, "urlopen", fake_urlopen)
 
-    def token(self, key_id=None, expires_in=3600, audience=None, issuer=None):
+    def token(self, key_id=None, expires_in=3600, audience=None, issuer=None, with_email=True):
         import time
         issued = int(time.time())
-        return self.pyjwt.encode(
-            {
-                "iss": issuer or f"https://securetoken.google.com/{self.PROJECT}",
-                "aud": audience or self.PROJECT,
-                "sub": "firebase-uid-42",
-                "iat": issued,
-                "exp": issued + expires_in,
+        claims = {
+            "iss": issuer or f"https://securetoken.google.com/{self.PROJECT}",
+            "aud": audience or self.PROJECT,
+            "sub": "firebase-uid-42",
+            "iat": issued,
+            "exp": issued + expires_in,
+        }
+        if with_email:
+            claims.update({
                 "email": "admin@example.com",
                 "email_verified": True,
-            },
+            })
+        return self.pyjwt.encode(
+            claims,
             self.private_key,
             algorithm="RS256",
             headers={"kid": key_id or self.key_id},
@@ -618,6 +647,20 @@ class TestFirebaseTokenVerification(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["uid"], "firebase-uid-42")
         self.assertTrue(response.json()["is_admin"])
+
+    def test_signin_without_email_claim_still_returns_an_account(self):
+        """Phone-only or anonymous-upgrade accounts carry no email claim.
+
+        Resolving the display name from `email` used to raise on a missing claim
+        and turn a valid sign-in verification into a 500 response."""
+        with self.patch_certificate_endpoint():
+            response = self.client.post("/api/auth/firebase", json={"id_token": self.token(with_email=False)})
+        self.assertEqual(response.status_code, 200, response.text)
+        account = response.json()
+        self.assertEqual(account["uid"], "firebase-uid-42")
+        self.assertEqual(account["email"], "")
+        self.assertEqual(account["name"], "LaundryAI user")
+        self.assertFalse(account["is_admin"])
 
     def test_rotated_signing_key_triggers_one_refresh(self):
         with self.patch_certificate_endpoint():
