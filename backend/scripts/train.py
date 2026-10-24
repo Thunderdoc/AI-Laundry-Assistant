@@ -212,6 +212,15 @@ for epoch in range(args.epochs):
         best_acc=val_acc
         best_state=copy.deepcopy(model.state_dict())
         stalled=0
+        # Checkpoint the best weights to disk every time they improve
+        # (2026-10-24): CPU retrains run for hours and the VM can restart.
+        # The final .pt is only written at the end, so without this an
+        # interruption loses everything. A checkpoint survives in the repo
+        # tree and can be exported with backend/scripts/export_checkpoint.py.
+        ckpt_path=Path(args.output).with_name(Path(args.output).stem + ".checkpoint.pt")
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"epoch": epoch + 1, "best_val_acc": best_acc, "state_dict": best_state}, str(ckpt_path))
+        print(f"checkpoint saved: {ckpt_path} (epoch {epoch + 1}, val_acc {best_acc:.4f})")
     else:
         stalled+=1
         if stalled>=args.patience:

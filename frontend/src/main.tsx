@@ -1297,6 +1297,15 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                     </div>
                   </div>
 
+                  {/* Server-measured photo sharpness: blurry photos are the
+                      model's weakest input (62.8% on blurred test photos), so
+                      a blurry result gets a retake hint instead of silent doubt. */}
+                  {result.quality?.blurry && (
+                    <div className="blur-warning" style={{ marginTop: "12px", padding: "10px 12px", borderRadius: "10px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", fontSize: "13px", fontWeight: 600, color: "var(--warning)" }}>
+                      📷 {result.quality.blur_warning || "Photo looks blurry — retake with a steady hand for a more reliable result."}
+                    </div>
+                  )}
+
                   {/* Confidence Probability Distribution */}
                   {result.alternatives && result.alternatives.length > 1 && (
                     <div className="alt-container">

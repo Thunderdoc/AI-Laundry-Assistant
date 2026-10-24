@@ -45,7 +45,7 @@ export type Prediction = {
   user_feedback?: any;
   owner_uid?: string | null;
   alternatives?: Alternative[];
-  quality?: { width?: number; height?: number; brightness?: number; texture?: number; warning?: boolean };
+  quality?: { width?: number; height?: number; brightness?: number; texture?: number; warning?: boolean; blur_score?: number; blurry?: boolean; blur_warning?: string | null };
   recommendation: Recommendation | null;
   preview: boolean;
   model_decision?: {
