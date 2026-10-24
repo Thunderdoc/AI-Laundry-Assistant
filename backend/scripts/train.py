@@ -36,7 +36,14 @@ train_tf=transforms.Compose([
     transforms.RandomResizedCrop(INPUT_SIZE, scale=(0.65, 1.0)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomVerticalFlip(p=0.5),
-    transforms.RandomRotation(degrees=20),
+    # Rotation widened 20 -> 35 degrees (2026-10-24): the shipped model scored
+    # only 72.9% on 30-degree-rotated phone photos, outside the old +/-20 range.
+    # Data priorities from the 2026-10-24 clean-test confusion matrix, in order:
+    # (1) cotton<->polyester confusion is 16 of 47 errors — these two need more
+    # diverse real photos, not more augmentation; (2) non_fabric has only ~15
+    # unique source photos, so it cannot generalize until fresh everyday-scene
+    # photos arrive (see docs/PHOTO_COLLECTION_BRIEF.md).
+    transforms.RandomRotation(degrees=35),
     transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), shear=8),
     transforms.RandomPerspective(distortion_scale=0.2, p=0.4),
     transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.20, hue=0.05),

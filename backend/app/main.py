@@ -468,6 +468,24 @@ def fabric(fabric:str):
     if fabric not in FABRICS: raise HTTPException(404,"Unsupported fabric")
     return {"id":fabric, **recommendation(fabric)}
 
+def laplacian_variance(im):
+    """Sharpness score for a photo (numpy only, no new dependency).
+
+    Calibrated 2026-10-24 on the clean test set: sharp photos median ~811,
+    Gaussian-blurred (shaky-photo-like) versions median ~4. A threshold of 50
+    separates the two at 97%. Advisory only — a flat, plain fabric can score
+    low while sharp, so this warns, it never blocks a prediction.
+    """
+    import numpy as np
+    gray = np.asarray(im.convert("L").resize((224, 224)), dtype=np.float32)
+    padded = np.pad(gray, 1, mode="edge")
+    lap = padded[:-2, 1:-1] + padded[2:, 1:-1] + padded[1:-1, :-2] + padded[1:-1, 2:] - 4.0 * gray
+    return float(lap.var())
+
+
+BLURRY_THRESHOLD = 50.0
+
+
 def five_crop_probabilities(model, im, input_size, mean, std):
     """Average softmax probabilities over five crops (corners + centre).
 
@@ -552,7 +570,9 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
 
     sample=ImageStat.Stat(im.resize((64,64)))
     texture=round(sum(sample.stddev)/3,1)
-    quality={"width":im.width,"height":im.height,"brightness":round(sum(sample.mean)/3,1),"texture":texture,"warning": im.width<224 or im.height<224}
+    blur_score=round(laplacian_variance(im),1)
+    blurry=blur_score<BLURRY_THRESHOLD
+    quality={"width":im.width,"height":im.height,"brightness":round(sum(sample.mean)/3,1),"texture":texture,"warning": im.width<224 or im.height<224,"blur_score":blur_score,"blurry":blurry,"blur_warning":"Photo looks blurry or shaky — retake with a steady hand for a more reliable result." if blurry else None}
     names=model_labels(); preview=False
     try:
         model=load_model()
