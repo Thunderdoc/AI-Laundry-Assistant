@@ -1,0 +1,43 @@
+# Render Blueprint for the LaundryAI backend (added 2026-10-24, unapplied).
+# Lets a fresh service be created from this repo in one step, instead of
+# hand-configuring a service whose env vars then drift (the cause of the
+# live "degraded" persistence state in Oct 2026).
+#
+# Apply with: Render dashboard -> New -> Blueprint -> connect this repo.
+# Secret values are sync:false on purpose: Render prompts for them in the
+# dashboard and they are never committed here.
+services:
+  - type: web
+    name: ai-laundry-assistant
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: singapore
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: PERSISTENCE_BACKEND
+        value: firebase
+      - key: FIREBASE_API_KEY
+        sync: false
+      - key: FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: FIREBASE_APP_ID
+        sync: false
+      - key: FIREBASE_DATABASE_URL
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://ai-laundry-assistant-p9lqnjvi8-thunderdoc.vercel.app

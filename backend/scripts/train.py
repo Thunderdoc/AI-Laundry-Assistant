@@ -40,7 +40,12 @@ train_tf=transforms.Compose([
     transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), shear=8),
     transforms.RandomPerspective(distortion_scale=0.2, p=0.4),
     transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.20, hue=0.05),
+    # Robustness for real phone photos (added 2026-10-24): mild blur and random
+    # erasing teach the model texture, not a lucky clean patch or background.
+    # Both are label-preserving for fabric texture classification.
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.2),
     transforms.ToTensor(),
+    transforms.RandomErasing(p=0.25, scale=(0.02, 0.15)),
     transforms.Normalize(MEAN, STD),
 ])
 eval_tf=transforms.Compose([
