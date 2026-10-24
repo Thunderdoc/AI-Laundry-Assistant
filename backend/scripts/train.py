@@ -63,6 +63,60 @@ train_ds=remap(datasets.ImageFolder(required[0], train_tf))
 val_ds=remap(datasets.ImageFolder(required[1], eval_tf))
 test_ds=remap(datasets.ImageFolder(required[2], eval_tf))
 
+def _split_stems(dataset):
+    """Source-photo stems per class, so Roboflow augmentations of one photo
+    (``<photo>_jpg.rf.<hash>.jpg``) still count as the same source."""
+    import re as _re
+    stems = {name: set() for name in ORDER}
+    for path, target in dataset.samples:
+        stem = _re.sub(r"_jpg\.rf\.[a-f0-9]+$", "", Path(path).stem)
+        stems[ORDER[target]].add(stem)
+    return stems
+
+def _denylisted_filenames():
+    """Filenames quarantined by the 2026 audit: every non_fabric val/test
+    image was a byte-identical copy of a train image. They stay on disk (the
+    deploy pipeline cannot move binary files), so code must exclude them."""
+    candidates = [
+        root.parent / "quarantine_leaked" / "non_fabric" / "LEAKED_FILES.txt",
+        Path(__file__).resolve().parents[2] / "data" / "quarantine_leaked" / "non_fabric" / "LEAKED_FILES.txt",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    return set()
+
+def _drop_denylisted(dataset, denylisted):
+    if not denylisted:
+        return 0
+    before = len(dataset.samples)
+    dataset.samples = [(p, y) for p, y in dataset.samples if Path(p).name not in denylisted]
+    dataset.targets = [y for _, y in dataset.samples]
+    return before - len(dataset.samples)
+
+def _assert_clean_splits():
+    """Refuse to train on leaked splits. A 2026 audit found every non_fabric
+    val/test image was a byte-identical copy of a train image, which made the
+    reported non_fabric metrics meaningless. Splits must be grouped by source
+    photo, not by augmented file. Denylisted (quarantined) files are dropped
+    before this check, so they can neither train nor inflate metrics."""
+    splits = {"train": _split_stems(train_ds), "val": _split_stems(val_ds), "test": _split_stems(test_ds)}
+    problems = []
+    for cls in ORDER:
+        for first, second in (("train", "val"), ("train", "test"), ("val", "test")):
+            overlap = sorted(splits[first][cls] & splits[second][cls])
+            if overlap:
+                problems.append(f"{cls}: {first}∩{second} shares {len(overlap)} source photo(s), e.g. {overlap[:3]}")
+    if problems:
+        raise SystemExit("Leaked data splits — fix data/ before training:\n" + "\n".join(problems))
+
+_denylisted = _denylisted_filenames()
+_dropped = {name: _drop_denylisted(ds, _denylisted) for name, ds in
+            (("train", train_ds), ("val", val_ds), ("test", test_ds))}
+if any(_dropped.values()):
+    print(f"Quarantine: dropped denylisted samples before training: {_dropped}")
+_assert_clean_splits()
+
 def split_counts(dataset):
     counts={name:0 for name in ORDER}
     for _, target in dataset.samples: counts[ORDER[target]]+=1

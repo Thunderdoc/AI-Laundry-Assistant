@@ -459,9 +459,14 @@ class TestLaundryAIAPI(unittest.TestCase):
 
     def test_23_admin_analytics_and_audit_log(self):
         from app import main
+        # Dates must stay inside the 30-day analytics window: the old hardcoded
+        # September 2026 dates made this test fail once the calendar moved past
+        # them (scan_count 0 != 2), even though the endpoint was correct.
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
         scans = [
-            {"fabric": "cotton", "confidence": 92, "created_at": "2026-09-17T10:00:00Z"},
-            {"fabric": "silk", "confidence": 61, "created_at": "2026-09-16T10:00:00Z"},
+            {"fabric": "cotton", "confidence": 92, "created_at": (now - timedelta(days=1)).strftime("%Y-%m-%dT10:00:00Z")},
+            {"fabric": "silk", "confidence": 61, "created_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT10:00:00Z")},
         ]
         with patch.object(main, "require_admin", return_value={"uid": "admin-1"}), patch.object(main, "saved_history", return_value=scans):
             analytics = self.client.get("/api/admin/analytics?days=30")

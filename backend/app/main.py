@@ -468,6 +468,45 @@ def fabric(fabric:str):
     if fabric not in FABRICS: raise HTTPException(404,"Unsupported fabric")
     return {"id":fabric, **recommendation(fabric)}
 
+def five_crop_probabilities(model, im, input_size, mean, std):
+    """Average softmax probabilities over five crops (corners + centre).
+
+    A single stretched 224x224 resize throws away texture detail and makes the
+    answer depend on where the fabric sits in the frame — the main reason phone
+    photos scored worse than the lab test set. Five crops of the same image
+    average that framing noise out. The crop size matches the model's training
+    input size; images smaller than one crop fall back to a single resize.
+    """
+    import torch, numpy as np
+    scale = max(input_size, int(round(input_size * 1.14)))
+    width, height = im.size
+    if width < input_size or height < input_size:
+        crops = [im.resize((input_size, input_size))]
+    else:
+        if width <= height:
+            resized = im.resize((scale, int(round(height * scale / width))))
+        else:
+            resized = im.resize((int(round(width * scale / height)), scale))
+        w, h = resized.size
+        boxes = [
+            (0, 0, input_size, input_size),
+            (w - input_size, 0, w, input_size),
+            (0, h - input_size, input_size, h),
+            (w - input_size, h - input_size, w, h),
+            ((w - input_size) // 2, (h - input_size) // 2,
+             (w - input_size) // 2 + input_size, (h - input_size) // 2 + input_size),
+        ]
+        crops = [resized.crop(box) for box in boxes]
+    tensors = []
+    for crop in crops:
+        pixels = np.asarray(crop, dtype=np.float32) / 255.0
+        tensors.append(torch.from_numpy(pixels).permute(2, 0, 1))
+    batch = torch.stack(tensors)
+    batch = (batch - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(1, 3, 1, 1)
+    with torch.no_grad():
+        probs = torch.softmax(model(batch), dim=1)
+    return probs.mean(dim=0).tolist()
+
 @app.post("/api/predict", summary="Predict fabric from an image")
 async def predict(request: Request, image:UploadFile=File(...), note:Optional[str]=Form(None)):
     if note is not None:
@@ -516,13 +555,9 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
     quality={"width":im.width,"height":im.height,"brightness":round(sum(sample.mean)/3,1),"texture":texture,"warning": im.width<224 or im.height<224}
     names=model_labels(); preview=False
     try:
-        import torch, numpy as np
         model=load_model()
         input_size, mean, std=preprocess_config()
-        pixels=np.asarray(im.resize((input_size,input_size)), dtype=np.float32)/255.0
-        tensor=torch.from_numpy(pixels).permute(2,0,1).unsqueeze(0)
-        tensor=(tensor-torch.tensor(mean).view(1,3,1,1))/torch.tensor(std).view(1,3,1,1)
-        with torch.no_grad(): probabilities=torch.softmax(model(tensor),dim=1).squeeze().tolist()
+        probabilities=five_crop_probabilities(model, im, input_size, mean, std)
         if len(probabilities)!=len(names): raise ValueError("Model output does not match configured labels")
         probabilities=list(probabilities)
     except HTTPException:
@@ -553,6 +588,7 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
         "recommendation":recommendation(fabric) if accepted_fabric else None,
         "preview":preview,
         "model_decision":{
+            "inference_method":"five_crop_average",
             "accepted":accepted_fabric,
             "detected_non_fabric":detected_non_fabric,
             "reason":decision_reason,

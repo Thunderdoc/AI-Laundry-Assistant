@@ -21,47 +21,47 @@
       0.225
     ]
   },
-  "val_images": 282,
-  "val_accuracy": 0.8191,
-  "test_images": 282,
-  "test_accuracy": 0.7943,
-  "macro_f1": 0.8012,
+  "val_images": 277,
+  "val_accuracy": 0.8339,
+  "test_images": 277,
+  "test_accuracy": 0.8303,
+  "macro_f1": 0.8278,
   "per_class_metrics": {
     "cotton": {
-      "precision": 0.8085,
-      "recall": 0.8085,
-      "f1_score": 0.8085,
-      "support": 47
+      "precision": 0.8333,
+      "recall": 0.75,
+      "f1_score": 0.7895,
+      "support": 60
     },
     "polyester": {
-      "precision": 0.7872,
-      "recall": 0.7872,
-      "f1_score": 0.7872,
-      "support": 47
+      "precision": 0.6964,
+      "recall": 0.6964,
+      "f1_score": 0.6964,
+      "support": 56
     },
     "denim": {
-      "precision": 0.8542,
-      "recall": 0.8723,
-      "f1_score": 0.8631,
-      "support": 47
+      "precision": 0.9167,
+      "recall": 0.9167,
+      "f1_score": 0.9167,
+      "support": 60
     },
     "wool": {
-      "precision": 0.8182,
-      "recall": 0.7660,
-      "f1_score": 0.7912,
-      "support": 47
+      "precision": 0.873,
+      "recall": 0.9483,
+      "f1_score": 0.9091,
+      "support": 58
     },
     "silk": {
-      "precision": 0.7609,
-      "recall": 0.7447,
-      "f1_score": 0.7527,
-      "support": 47
+      "precision": 0.8182,
+      "recall": 0.8372,
+      "f1_score": 0.8276,
+      "support": 43
     },
     "non_fabric": {
-      "precision": 0.8222,
-      "recall": 0.7872,
-      "f1_score": 0.8043,
-      "support": 47
+      "precision": null,
+      "recall": null,
+      "f1_score": null,
+      "support": 0
     }
   },
   "confusion_matrix": {
@@ -74,15 +74,107 @@
       "non_fabric"
     ],
     "matrix": [
-      [38, 4, 3, 0, 2, 0],
-      [4, 37, 2, 1, 2, 1],
-      [3, 1, 41, 1, 0, 1],
-      [2, 3, 1, 36, 3, 2],
-      [3, 4, 0, 3, 35, 2],
-      [1, 1, 1, 2, 5, 37]
-    ]
+      [
+        45,
+        7,
+        3,
+        3,
+        2,
+        0
+      ],
+      [
+        9,
+        39,
+        1,
+        2,
+        5,
+        0
+      ],
+      [
+        0,
+        4,
+        55,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        1,
+        55,
+        1,
+        0
+      ],
+      [
+        0,
+        5,
+        0,
+        2,
+        36,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "per_class_metrics": {
+      "cotton": {
+        "precision": 0.8333,
+        "recall": 0.75,
+        "f1_score": 0.7895,
+        "support": 60
+      },
+      "polyester": {
+        "precision": 0.6964,
+        "recall": 0.6964,
+        "f1_score": 0.6964,
+        "support": 56
+      },
+      "denim": {
+        "precision": 0.9167,
+        "recall": 0.9167,
+        "f1_score": 0.9167,
+        "support": 60
+      },
+      "wool": {
+        "precision": 0.873,
+        "recall": 0.9483,
+        "f1_score": 0.9091,
+        "support": 58
+      },
+      "silk": {
+        "precision": 0.8182,
+        "recall": 0.8372,
+        "f1_score": 0.8276,
+        "support": 43
+      },
+      "non_fabric": {
+        "precision": null,
+        "recall": null,
+        "f1_score": null,
+        "support": 0
+      }
+    },
+    "macro_f1": 0.8278
   },
-  "test_inference_seconds": 0.8267,
-  "min_confidence": 0.35,
-  "min_margin": 0.08
+  "min_confidence": 0.55,
+  "min_margin": 0.1,
+  "evaluation": {
+    "evaluated_at": "2026-10-24",
+    "method": "five-crop average inference (the same path /api/predict now uses), top-1, no decision-gate filtering for accuracy",
+    "accepted_accuracy_at_gates": 0.8683,
+    "unknown_rate_at_gates": 0.1227,
+    "gates": {
+      "min_confidence": 0.55,
+      "min_margin": 0.1
+    },
+    "exclusions": "non_fabric has no held-out images: its 5 val + 5 test images were byte-identical copies of train images and are denylisted in data/quarantine_leaked/non_fabric/LEAKED_FILES.txt (excluded by train.py and evaluate.py). Its metrics are null (unmeasured), not zero.",
+    "script": "backend/scripts/evaluate.py --data data/test (and data/val)"
+  }
 }
