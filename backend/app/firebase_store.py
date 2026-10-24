@@ -347,8 +347,11 @@ def create_prediction(owner_uid: str, record: dict[str, Any], jpeg: bytes) -> di
             blob = _bucket().blob(storage_path)
             blob.upload_from_string(jpeg, content_type="image/jpeg")
     except Exception:
-        storage_path = None
-        blob = None
+        # Audit P1-4: never persist a record whose photo failed to upload and
+        # report it saved — feedback on such a record 503s forever (its
+        # image_token is None). Raising lets predict fall into its local
+        # fallback path with an honest device-only badge instead.
+        raise
     saved = {**record, "id": record_id, "image_token": storage_path, "owner_uid": owner_uid}
     try:
         _root(f"predictions/{record_id}").set(saved)

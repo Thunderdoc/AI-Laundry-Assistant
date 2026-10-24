@@ -755,17 +755,32 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
     try {
       setStatus("Connecting to the AI service…");
-      let health = await withTimeout(fetch(`${API}/health`), 4_000, "health check").catch(() => null);
+      let health = await withTimeout(fetch(`${API}/health?probe=false`), 4_000, "health check").catch(() => null);
       if (!health?.ok) {
         setStatus("Waking the AI service. This can take a few moments…");
         await new Promise((resolve) => setTimeout(resolve, 2500));
-        health = await withTimeout(fetch(`${API}/health`), 4_000, "health check").catch(() => null);
+        health = await withTimeout(fetch(`${API}/health?probe=false`), 4_000, "health check").catch(() => null);
       }
-      const response = await withTimeout(
-        apiFetch(`${API}/predict`, { method: "POST", body: form }),
-        35_000,
-        "Inference request timed out. The server may be busy or waking up. Please retry."
-      );
+      // Audit P1-10: cold starts can exceed even a generous timeout once, so
+      // retry once on a timeout only. Other errors surface immediately, so a
+      // completed-but-unacknowledged scan is never duplicated in history.
+      const predictOnce = () =>
+        withTimeout(
+          apiFetch(`${API}/predict`, { method: "POST", body: form }),
+          120_000,
+          "Inference request timed out. The server may be busy or waking up."
+        );
+      let response: Response;
+      try {
+        response = await predictOnce();
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("timed out")) {
+          setStatus("Still waking the service — retrying once…");
+          response = await predictOnce();
+        } else {
+          throw error;
+        }
+      }
       const data = (await response.json()) as Prediction;
       if (!response.ok) {
         if (response.status === 401) setSessionExpired(true);
@@ -1306,6 +1321,14 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                     </div>
                   )}
 
+                  {/* Audit P1-1: never let a device-only save look like a cloud
+                      save — this scan lives on this browser only. */}
+                  {result.saved_local_only && (
+                    <div style={{ marginTop: "12px", padding: "10px 12px", borderRadius: "10px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", fontSize: "13px", fontWeight: 600, color: "var(--warning)" }}>
+                      💾 Saved on this device only — cloud history is unavailable, so this scan will not sync.
+                    </div>
+                  )}
+
                   {/* Confidence Probability Distribution */}
                   {result.alternatives && result.alternatives.length > 1 && (
                     <div className="alt-container">
@@ -1331,7 +1354,11 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       Help LaundryAI learn. Your correction enters a private review queue; an administrator checks the label before it can become training data.
                     </p>
 
-                    {feedbackSubmitted ? (
+                    {result.feedback_available === false || result.id == null ? (
+                      <p style={{ fontSize: "13.5px", color: "var(--text-light)" }}>
+                        Feedback is unavailable for this scan because it could not be saved. Rescan to submit a correction.
+                      </p>
+                    ) : feedbackSubmitted ? (
                       <div className="feedback-success-badge">
                         <span>✓</span>
                         <span>{feedbackMessage}</span>
@@ -1341,22 +1368,29 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                         {!isSelectingCorrection ? (
                           <div>
                             <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--dark)", marginBottom: "10px" }}>
-                              Is this garment actually <b>{result.fabric.toUpperCase()}</b>?
+                              {result.model_decision?.accepted
+                                ? <>Is this garment actually <b>{result.fabric.toUpperCase()}</b>?</>
+                                : <>The AI couldn&apos;t confidently match this fabric — help correct it:</>}
                             </p>
                             <div className="feedback-actions">
-                              <button
-                                type="button"
-                                className="feedback-correct-btn"
-                                onClick={() => submitFeedback(result.model_decision?.top_fabric || result.fabric, true)}
-                              >
-                                ✓ Yes, it's {result.fabric.toUpperCase()} (Submit for Review)
-                              </button>
+                              {/* Audit P1-3: never offer "Yes, correct" for a prediction
+                                  the model itself rejected — that launders guesses
+                                  into "verified correct" training candidates. */}
+                              {result.model_decision?.accepted && (
+                                <button
+                                  type="button"
+                                  className="feedback-correct-btn"
+                                  onClick={() => submitFeedback(result.model_decision?.top_fabric || result.fabric, true)}
+                                >
+                                  ✓ Yes, it's {result.fabric.toUpperCase()} (Submit for Review)
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="feedback-wrong-btn"
                                 onClick={() => setIsSelectingCorrection(true)}
                               >
-                                ✗ No, it's a different fabric
+                                {result.model_decision?.accepted ? "✗ No, it's a different fabric" : "Select the actual fabric"}
                               </button>
                             </div>
                           </div>

@@ -17,7 +17,8 @@ os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"] = ""
 os.environ["FIREBASE_SERVICE_ACCOUNT_JSON_B64"] = ""
 os.environ["FIREBASE_SERVICE_ACCOUNT_FILE"] = ""
 os.environ["ENABLE_RETRAINING"] = "false"
-from app.main import app, connection, FABRICS
+from app.main import app, connection, FABRICS, resolve_frontend_file
+import app.main as app_main
 from app import firebase_store
 
 class TestLaundryAIAPI(unittest.TestCase):
@@ -700,6 +701,143 @@ class TestFirebaseTokenVerification(unittest.TestCase):
         with patch.dict(self.main.FIREBASE_CONFIG, {"projectId": "", "apiKey": ""}):
             response = self.client.post("/api/auth/firebase", json={"id_token": self.token()})
         self.assertEqual(response.status_code, 503)
+
+
+class TestFrontendStaticContainment(unittest.TestCase):
+    """Regression tests for the 2026-10-24 audit P0 (SPA path traversal).
+
+    The route itself is only registered when frontend/dist exists at import,
+    so these tests exercise resolve_frontend_file directly with a patched
+    FRONTEND_DIST — the helper is the entire security boundary.
+    """
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        self.dist = os.path.join(self.root.name, "dist")
+        os.makedirs(os.path.join(self.dist, "assets"))
+        with open(os.path.join(self.dist, "index.html"), "w") as f:
+            f.write("<html>spa</html>")
+        with open(os.path.join(self.dist, "assets", "app.js"), "w") as f:
+            f.write("console.log(1)")
+        with open(os.path.join(self.root.name, "secret.txt"), "w") as f:
+            f.write("TOP-SECRET")
+        self._old = app_main.FRONTEND_DIST
+        app_main.FRONTEND_DIST = self.dist
+
+    def tearDown(self):
+        app_main.FRONTEND_DIST = self._old
+        self.root.cleanup()
+
+    def test_in_dist_file_resolves(self):
+        self.assertEqual(
+            resolve_frontend_file("assets/app.js"),
+            os.path.join(self.dist, "assets", "app.js"),
+        )
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(resolve_frontend_file("nope.js"))
+
+    def test_empty_path_returns_none(self):
+        self.assertIsNone(resolve_frontend_file(""))
+
+    def test_dotdot_escape_returns_none(self):
+        self.assertIsNone(resolve_frontend_file("../secret.txt"))
+        self.assertIsNone(resolve_frontend_file("assets/../../secret.txt"))
+        self.assertIsNone(resolve_frontend_file("../../../etc/hostname"))
+
+    def test_absolute_path_returns_none(self):
+        self.assertIsNone(resolve_frontend_file(os.path.join(self.root.name, "secret.txt")))
+        self.assertIsNone(resolve_frontend_file("/etc/hostname"))
+
+
+class TestP1Fixes(unittest.TestCase):
+    """Regression tests for the 2026-10-24 audit P1 fixes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+
+    def _sample_image(self, color=(128, 128, 128)):
+        img = Image.new("RGB", (100, 100), color=color)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        return buf.getvalue()
+
+    def test_request_uid_scopes_guest_history_per_device(self):
+        from types import SimpleNamespace
+        from app.main import request_uid
+        anon = SimpleNamespace(state=SimpleNamespace(user=None), headers={"x-anonymous-id": "device-abc-123"})
+        self.assertEqual(request_uid(anon), "anon:device-abc-123")
+        other = SimpleNamespace(state=SimpleNamespace(user=None), headers={"x-anonymous-id": "device-xyz-789"})
+        self.assertEqual(request_uid(other), "anon:device-xyz-789")
+        bad = SimpleNamespace(state=SimpleNamespace(user=None), headers={"x-anonymous-id": "x"})
+        self.assertEqual(request_uid(bad), "local-preview")
+        none = SimpleNamespace(state=SimpleNamespace(user=None), headers={})
+        self.assertEqual(request_uid(none), "local-preview")
+
+    def test_predict_reports_blur_fields(self):
+        res = self.client.post("/api/predict", files={"image": ("sample.jpg", self._sample_image(), "image/jpeg")})
+        self.assertEqual(res.status_code, 200)
+        quality = res.json().get("quality") or {}
+        self.assertIn("blur_score", quality)
+        self.assertIn("blurry", quality)
+        self.assertIn("blur_warning", quality)
+
+    def test_firebase_failure_falls_back_to_local_save(self):
+        from app import main as app_main
+        with patch.object(app_main.firebase_store, "enabled", return_value=True), \
+             patch.object(app_main.firebase_store, "configured", return_value=True), \
+             patch.object(app_main.firebase_store, "call_with_timeout", side_effect=RuntimeError("cloud down")):
+            res = self.client.post("/api/predict", files={"image": ("sample.jpg", self._sample_image(), "image/jpeg")})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data["saved"])
+        self.assertTrue(data["saved_local_only"])
+        self.assertTrue(data["feedback_available"])
+        self.assertIsNotNone(data["id"])
+        history = self.client.get("/api/history")
+        self.assertTrue(any(str(item["id"]) == str(data["id"]) for item in history.json()))
+
+    def test_upload_failure_raises_instead_of_fake_saved(self):
+        from app import firebase_store
+        with patch.object(firebase_store, "_storage_provider", return_value="supabase"), \
+             patch.object(firebase_store, "_supabase_upload", side_effect=RuntimeError("storage down")):
+            with self.assertRaises(RuntimeError):
+                firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
+
+    def test_local_delete_removes_photo_file(self):
+        from app import main as app_main
+        res = self.client.post("/api/predict", files={"image": ("sample.jpg", self._sample_image(), "image/jpeg")})
+        data = res.json()
+        path = os.path.join(app_main.UPLOADS_DIR, data["image_token"])
+        self.assertTrue(os.path.isfile(path))
+        deleted = self.client.delete(f"/api/history/{data['id']}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(os.path.exists(path))
+
+    def test_history_limit_bounds_response(self):
+        for _ in range(3):
+            self.client.post("/api/predict", files={"image": ("sample.jpg", self._sample_image(), "image/jpeg")})
+        res = self.client.get("/api/history?limit=2")
+        self.assertEqual(res.status_code, 200)
+        self.assertLessEqual(len(res.json()), 2)
+
+    def test_model_path_prefers_bundled_copy(self):
+        from app import main as app_main
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled = os.path.join(tmp, "bundled.pt")
+            local = os.path.join(tmp, "local.pt")
+            open(bundled, "wb").close()
+            open(local, "wb").close()
+            with patch.object(app_main, "_bundled_model_path", bundled), \
+                 patch.object(app_main, "_default_model_path", local):
+                with patch.dict(os.environ, {}):
+                    os.environ.pop("MODEL_PATH", None)
+                    self.assertEqual(app_main.resolve_model_path(), bundled)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,8 @@ export type Prediction = {
   owner_uid?: string | null;
   alternatives?: Alternative[];
   quality?: { width?: number; height?: number; brightness?: number; texture?: number; warning?: boolean; blur_score?: number; blurry?: boolean; blur_warning?: string | null };
+  saved_local_only?: boolean;
+  feedback_available?: boolean;
   recommendation: Recommendation | null;
   preview: boolean;
   model_decision?: {
@@ -191,11 +193,32 @@ export async function currentIdToken(forceRefresh = false): Promise<string | nul
   return forceRefresh ? null : readStoredToken();
 }
 
+// Per-device anonymous id for no-auth mode (audit P1-2): lets the backend
+// scope guest history per device instead of one shared pool. Stored locally,
+// never a credential; a privacy-restricted browser falls back to a shared id.
+function getAnonymousId(): string {
+  const key = "laundryai-anon-id";
+  try {
+    let id = window.localStorage.getItem(key);
+    if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
+      const raw = window.crypto?.randomUUID
+        ? window.crypto.randomUUID().replace(/-/g, "")
+        : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+      id = raw.slice(0, 32);
+      window.localStorage.setItem(key, id);
+    }
+    return id;
+  } catch {
+    return "local-preview-fallback";
+  }
+}
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}, retry = true): Promise<Response> {
   const token = await currentIdToken();
   const send = (value: string | null) => {
     const headers = new Headers(init.headers);
     if (value) headers.set("Authorization", `Bearer ${value}`);
+    headers.set("X-Anonymous-Id", getAnonymousId());
     return fetch(input, { ...init, headers });
   };
   const response = await send(token);

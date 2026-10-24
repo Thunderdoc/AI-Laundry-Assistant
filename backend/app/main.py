@@ -294,7 +294,15 @@ def audit_events(limit: int = 100, offset: int = 0) -> list[dict]:
 
 def request_uid(request: Request) -> str:
     user = getattr(request.state, "user", None)
-    return str(user.get("uid")) if user and user.get("uid") else "local-preview"
+    if user and user.get("uid"):
+        return str(user.get("uid"))
+    # No-auth mode: scope history per device instead of one shared pool.
+    # The frontend sends a stored anonymous id; anything malformed falls back
+    # to the legacy shared id so old clients keep working (audit P1-2).
+    anon = (request.headers.get("x-anonymous-id", "") or "").strip()
+    if 8 <= len(anon) <= 64 and anon.isascii() and all(c.isalnum() or c in "_-" for c in anon):
+        return "anon:" + anon
+    return "local-preview"
 
 # Production scale: in Firebase mode every read pulls the entire predictions
 # node, and the admin endpoints (overview + scans + analytics) do that several
@@ -323,23 +331,36 @@ def _cached_firebase_history() -> list[dict]:
         _RAW_HISTORY_CACHE["expires_at"] = now + _HISTORY_CACHE_TTL_SECONDS
     return rows
 
-def saved_history(owner_uid: str | None = None):
+def saved_history(owner_uid: str | None = None, limit: int | None = None):
+    """User history, newest first.
+
+    limit bounds the RESPONSE (audit P1-9, partial): SQL applies it in the
+    query; the Firebase branch still fetches through the shared cache and
+    slices after filtering, because the Admin SDK read has no owner index to
+    push down to — a full query-layer pagination is a follow-up, not hidden.
+    Callers that need everything (export, analytics, single-record lookup)
+    pass no limit.
+    """
     if firebase_store.enabled():
         rows = _cached_firebase_history()
         if owner_uid is not None:
             rows = [row for row in rows if row.get("owner_uid") == owner_uid]
-        return rows
+        return rows[:limit] if limit is not None else rows
     with connection() as db:
         if owner_uid is None:
-            rows=db.execute("SELECT payload FROM predictions ORDER BY id DESC")
+            rows=db.execute("SELECT payload FROM predictions ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit is not None else ""))
         else:
-            rows=db.execute("SELECT payload FROM predictions WHERE owner_uid=? ORDER BY id DESC",(owner_uid,))
+            rows=db.execute("SELECT payload FROM predictions WHERE owner_uid=? ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit is not None else ""),(owner_uid,))
         return [json.loads(row["payload"]) for row in rows]
 
 _default_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "fabric_mobilenetv2.pt"))
 _bundled_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "models", "fabric_mobilenetv2.pt"))
-# Development keeps the model under models/. The repository also bundles a tracked
-# deploy copy under backend/models/ so cloud hosts receive the weights.
+# ONE canonical model: the tracked bundled copy under backend/models/ wins over
+# any host-local file (audit P1-7). The old order preferred a git-ignored
+# host-local retrain output, so "the new model is live" could be true on one
+# host and false on another with no visible difference. An explicit MODEL_PATH
+# still wins (operator choice); a retrain only ships by deliberately replacing
+# the bundled file, never by landing next to it.
 def resolve_model_path() -> str:
     configured = os.getenv("MODEL_PATH", "").strip()
     candidates = []
@@ -349,7 +370,7 @@ def resolve_model_path() -> str:
         # repository-relative value as well, so either models/... or
         # backend/models/... works without silently disabling inference.
         candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", configured)))
-    candidates.extend((_default_model_path, _bundled_model_path))
+    candidates.extend((_bundled_model_path, _default_model_path))
     for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate
@@ -374,6 +395,7 @@ def load_model():
         if output.ndim != 2 or output.shape[1] != len(model_labels()):
             raise RuntimeError("Model output does not match the manifest classes.")
         _MODEL, _MODEL_ERROR = model, None
+        print(f"LaundryAI model loaded from {MODEL_PATH}")
         return model
     except Exception as exc:
         _MODEL_ERROR = str(exc)
@@ -434,9 +456,13 @@ def preprocess_config():
 def root(): return {"service":"LaundryAI API", "health":"/api/health", "docs":"/docs"}
 
 @app.get("/api/health")
-def health():
+def health(probe: bool = True):
+    # Audit P2-6: the frontend's 4s health check raced the full Firebase probe
+    # (5s DB + 6s storage timeouts) and fell into a false "waking" path.
+    # ?probe=false skips the network probes for a cheap liveness check; the
+    # default keeps full probing for monitors like the keep-alive cron.
     state=model_status()
-    persistence=firebase_store.status(probe=True)
+    persistence=firebase_store.status(probe=probe)
     healthy=state["ready"] and persistence["configured"] and persistence.get("reachable",True)
     return {"status":"ok" if healthy else "degraded", "model_ready":state["ready"], "model_error":state["error"], "persistence":persistence}
 
@@ -524,6 +550,29 @@ def five_crop_probabilities(model, im, input_size, mean, std):
     with torch.no_grad():
         probs = torch.softmax(model(batch), dim=1)
     return probs.mean(dim=0).tolist()
+
+def _save_locally(owner_uid, record, normalized_bytes, image_token):
+    """Insert a prediction into local SQLite (device-local history).
+
+    Used when Firebase is enabled but its save failed: the scan must not
+    vanish silently (audit P1-1). The caller marks the record saved_local_only
+    and explains that it will not sync. The photo is stored next to the record
+    so local feedback and history still work.
+    """
+    if normalized_bytes is not None and image_token:
+        try:
+            os.makedirs(UPLOADS_DIR, exist_ok=True)
+            with open(os.path.join(UPLOADS_DIR, os.path.basename(image_token)), "wb") as f:
+                f.write(normalized_bytes)
+        except Exception:
+            pass
+    with connection() as db:
+        cursor = db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)", (owner_uid, record["created_at"], record["fabric"], record["confidence"], json.dumps(record)))
+        record["id"] = cursor.lastrowid
+        db.execute("UPDATE predictions SET payload=? WHERE id=?", (json.dumps(record), record["id"]))
+    _invalidate_history_cache()
+    return record
+
 
 @app.post("/api/predict", summary="Predict fabric from an image")
 async def predict(request: Request, image:UploadFile=File(...), note:Optional[str]=Form(None)):
@@ -635,17 +684,26 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
             except Exception:
                 persistence_warning="Prediction completed, but cloud history could not be saved. Try again later."
         if persistence_warning:
-            # Never retain an image token when its protected upload failed.
-            record.update({"id":None,"image_token":None,"saved":False,"feedback_available":False,"persistence_warning":persistence_warning})
+            # Fall back to device-local storage instead of losing the scan
+            # (audit P1-1). Only if even that fails do we report unsaved.
+            try:
+                record=_save_locally(owner_uid, record, normalized_bytes, image_token)
+                record.update({"saved":True,"saved_local_only":True,"feedback_available":True,"persistence_warning":"Cloud history is unavailable — this scan is saved on this device only and will not sync."})
+                with connection() as db:
+                    db.execute("UPDATE predictions SET payload=? WHERE id=?", (json.dumps(record), record["id"]))
+            except Exception:
+                record.update({"id":None,"image_token":None,"saved":False,"saved_local_only":False,"feedback_available":False,"persistence_warning":persistence_warning})
         else:
-            record.update({"saved":True,"feedback_available":True,"persistence_warning":None})
+            record.update({"saved":True,"saved_local_only":False,"feedback_available":True,"persistence_warning":None})
     else:
         with connection() as db:
             cursor=db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)",(owner_uid,record["created_at"],output_fabric,record["confidence"],json.dumps(record)))
             record["id"]=cursor.lastrowid
             db.execute("UPDATE predictions SET payload=? WHERE id=?",(json.dumps(record),record["id"]))
         _invalidate_history_cache()
-        record.update({"saved":True,"feedback_available":True,"persistence_warning":None})
+        record.update({"saved":True,"saved_local_only":False,"feedback_available":True,"persistence_warning":None})
+        with connection() as db:
+            db.execute("UPDATE predictions SET payload=? WHERE id=?", (json.dumps(record), record["id"]))
     return record
 
 @app.post("/api/feedback", summary="Human-in-the-loop active learning feedback")
@@ -751,7 +809,9 @@ def dataset_stats():
     return result
 
 @app.get("/api/history")
-def get_history(request: Request): return saved_history(request_uid(request))
+def get_history(request: Request, limit: int = 100):
+    limit = max(1, min(500, int(limit)))
+    return saved_history(request_uid(request), limit=limit)
 
 @app.get("/api/history/{record_id}")
 def get_one_history(record_id:str, request: Request):
@@ -784,6 +844,22 @@ def update_history_note(record_id:str, request: Request, payload:dict=Body(...))
     _invalidate_history_cache()
     return data
 
+def _delete_local_upload(image_token):
+    """Delete a device-local upload file (audit P1-5).
+
+    Only plain filenames are accepted — anything with a path separator is
+    ignored, so a crafted token can never delete an arbitrary file.
+    """
+    if not image_token or image_token != os.path.basename(image_token):
+        return
+    try:
+        path = os.path.join(UPLOADS_DIR, image_token)
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 @app.delete("/api/history/{record_id}")
 def delete_history(record_id:str, request: Request):
     if firebase_store.enabled():
@@ -795,7 +871,13 @@ def delete_history(record_id:str, request: Request):
         _invalidate_history_cache()
         return {"deleted":True}
     with connection() as db:
-        if not db.execute("DELETE FROM predictions WHERE id=? AND owner_uid=?",(record_id,request_uid(request))).rowcount: raise HTTPException(404,"Analysis not found")
+        row=db.execute("SELECT payload FROM predictions WHERE id=? AND owner_uid=?",(record_id,request_uid(request))).fetchone()
+        if not row: raise HTTPException(404,"Analysis not found")
+        try:
+            _delete_local_upload(json.loads(row["payload"]).get("image_token"))
+        except Exception:
+            pass
+        db.execute("DELETE FROM predictions WHERE id=? AND owner_uid=?",(record_id,request_uid(request)))
     _invalidate_history_cache()
     return {"deleted":True}
 
@@ -840,7 +922,14 @@ def clear_history(request: Request):
             return {"deleted":True,"count":count}
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
-    with connection() as db: db.execute("DELETE FROM predictions WHERE owner_uid=?",(request_uid(request),))
+    with connection() as db:
+        rows=db.execute("SELECT payload FROM predictions WHERE owner_uid=?",(request_uid(request),)).fetchall()
+        for row in rows:
+            try:
+                _delete_local_upload(json.loads(row["payload"]).get("image_token"))
+            except Exception:
+                pass
+        db.execute("DELETE FROM predictions WHERE owner_uid=?",(request_uid(request),))
     _invalidate_history_cache()
     return {"deleted":True}
 
@@ -1109,6 +1198,34 @@ def admin_feedback_image(fabric_name: str, filename: str, request: Request):
     if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
     return FileResponse(source,media_type="image/jpeg",headers={"Cache-Control":"private, no-store"})
 
+def _mark_local_feedback_reviewed(fabric_name, filename, status):
+    """Update the prediction payload behind an approved/rejected review file.
+
+    Local feedback stores the review file path in the prediction payload, but
+    approve/reject never wrote back — history kept showing 'pending' after a
+    decision (audit P1-8). Best effort: no match means nothing to update.
+    """
+    expected = os.path.relpath(
+        os.path.join(DATA_DIR, "review_pending", fabric_name, os.path.basename(filename)),
+        start=os.path.dirname(DATA_DIR),
+    )
+    try:
+        with connection() as db:
+            rows = db.execute("SELECT id, payload FROM predictions").fetchall()
+            for row in rows:
+                try:
+                    data = json.loads(row["payload"])
+                except Exception:
+                    continue
+                fb = data.get("user_feedback") or {}
+                if fb.get("saved_path") == expected and fb.get("review_status") == "pending":
+                    fb["review_status"] = status
+                    data["user_feedback"] = fb
+                    db.execute("UPDATE predictions SET payload=? WHERE id=?", (json.dumps(data), row["id"]))
+    except Exception:
+        pass
+
+
 @app.post("/api/admin/feedback/{fabric_name}/{filename}/approve")
 def approve_feedback(fabric_name: str, filename: str, request: Request):
     admin=require_admin(request)
@@ -1128,6 +1245,7 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
     os.makedirs(target_dir,exist_ok=True)
     target=os.path.join(target_dir,safe_name)
     shutil.move(source,target)
+    _mark_local_feedback_reviewed(fabric_name, safe_name, "approved")
     record_audit("feedback_approved", str(admin.get("uid")), None, {"file": safe_name, "fabric": fabric_name})
     return {"approved":True,"fabric":fabric_name,"file":safe_name}
 
@@ -1146,6 +1264,7 @@ def reject_feedback(fabric_name: str, filename: str, request: Request):
     source=os.path.join(DATA_DIR,"review_pending",fabric_name,os.path.basename(filename))
     if not os.path.isfile(source): raise HTTPException(404,"Pending feedback image not found.")
     os.remove(source)
+    _mark_local_feedback_reviewed(fabric_name, os.path.basename(filename), "rejected")
     record_audit("feedback_rejected", str(admin.get("uid")), None, {"file": os.path.basename(filename), "fabric": fabric_name})
     return {"rejected":True}
 
@@ -1422,12 +1541,31 @@ def training_callback(update: TrainingCallback, request: Request):
 # Production deployment: the React build and API share one origin, so `/api`
 # requests work without a separate Vite development server or proxy.
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+
+def resolve_frontend_file(path: str):
+    """Map an SPA request path to a file inside FRONTEND_DIST, or None.
+
+    SECURITY (fixed 2026-10-24, audit P0): the old route joined the raw path
+    onto FRONTEND_DIST and served whatever it resolved to, so a request like
+    /../../etc/hostname or /../../../data/laundryai.db escaped the build
+    directory and was served unauthenticated. This resolves symlinks and
+    refuses anything outside FRONTEND_DIST; the route then falls back to
+    index.html exactly as it does for any unknown in-dist path.
+    """
+    base = os.path.realpath(FRONTEND_DIST)
+    requested = os.path.realpath(os.path.join(base, path or ""))
+    if requested != base and not requested.startswith(base + os.sep):
+        return None
+    if not os.path.isfile(requested):
+        return None
+    return requested
+
 if os.path.isdir(FRONTEND_DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend_app(path: str):
-        requested = os.path.join(FRONTEND_DIST, path)
-        if path and os.path.isfile(requested):
-            return FileResponse(requested)
+        resolved = resolve_frontend_file(path)
+        if resolved:
+            return FileResponse(resolved)
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))

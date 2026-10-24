@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
+from PIL import Image
 
 ORDER=["cotton","polyester","denim","wool","silk","non_fabric"]
 INPUT_SIZE=224
@@ -251,10 +252,64 @@ def infer_stats(loader):
                     margins.append(float((top_vals[i,0]-top_vals[i,1]).item()))
     return good, n, confidences, margins, matrix
 
-val_good, val_n, val_conf, val_margin, _=infer_stats(val_loader)
-test_start=time.perf_counter()
-test_good, test_n, _, _, test_matrix=infer_stats(test_loader)
-test_seconds=time.perf_counter()-test_start
+def five_crop_batch(im):
+    """Mirror backend/app/main.py five_crop_probabilities exactly."""
+    scale = max(INPUT_SIZE, int(round(INPUT_SIZE * 1.14)))
+    width, height = im.size
+    if width < INPUT_SIZE or height < INPUT_SIZE:
+        crops = [im.resize((INPUT_SIZE, INPUT_SIZE))]
+    else:
+        if width <= height:
+            resized = im.resize((scale, int(round(height * scale / width))))
+        else:
+            resized = im.resize((int(round(width * scale / height)), scale))
+        w, h = resized.size
+        boxes = [
+            (0, 0, INPUT_SIZE, INPUT_SIZE),
+            (w - INPUT_SIZE, 0, w, INPUT_SIZE),
+            (0, h - INPUT_SIZE, INPUT_SIZE, h),
+            (w - INPUT_SIZE, h - INPUT_SIZE, w, h),
+            ((w - INPUT_SIZE) // 2, (h - INPUT_SIZE) // 2,
+             (w - INPUT_SIZE) // 2 + INPUT_SIZE, (h - INPUT_SIZE) // 2 + INPUT_SIZE),
+        ]
+        crops = [resized.crop(box) for box in boxes]
+    tensors = [transforms.functional.normalize(transforms.functional.to_tensor(crop), MEAN, STD) for crop in crops]
+    return torch.stack(tensors)
+
+
+def infer_stats_fivecrop(dataset):
+    """Final-eval stats on the SAME inference the server ships (audit P1-6).
+
+    infer_stats (single stretched resize) stays as the per-epoch training
+    signal, but manifest numbers and gates must describe five-crop serving —
+    the old manifest mixed the two and misled every promotion decision.
+    """
+    good = 0; n = 0; confidences = []; margins = []
+    k = len(ORDER); matrix = [[0] * k for _ in range(k)]
+    with torch.no_grad():
+        for path, target in dataset.samples:
+            im = Image.open(path).convert("RGB")
+            batch = five_crop_batch(im).to(device, non_blocking=True)
+            probs = torch.softmax(model(batch), dim=1).mean(dim=0)
+            top_vals, top_idx = torch.topk(probs, k=2)
+            pred = int(top_idx[0].item())
+            correct = (pred == target)
+            good += int(correct); n += 1
+            matrix[target][pred] += 1
+            if correct:
+                confidences.append(float(top_vals[0].item()))
+                margins.append(float((top_vals[0] - top_vals[1]).item()))
+    return good, n, confidences, margins, matrix
+
+
+val_pil = remap(datasets.ImageFolder(required[1]))
+test_pil = remap(datasets.ImageFolder(required[2]))
+_drop_denylisted(val_pil, _denylisted)
+_drop_denylisted(test_pil, _denylisted)
+val_good, val_n, val_conf, val_margin, _ = infer_stats_fivecrop(val_pil)
+test_start = time.perf_counter()
+test_good, test_n, _, _, test_matrix = infer_stats_fivecrop(test_pil)
+test_seconds = time.perf_counter() - test_start
 
 # Compute per-class Precision, Recall, F1
 k=len(ORDER)
@@ -265,6 +320,17 @@ for c_idx, c_name in enumerate(ORDER):
     fp = sum(test_matrix[r][c_idx] for r in range(k) if r != c_idx)
     fn = sum(test_matrix[c_idx][col] for col in range(k) if col != c_idx)
     support = sum(test_matrix[c_idx])
+    if support == 0:
+        # Zero held-out support means UNMEASURED, not zero (audit P1-6;
+        # mirrors evaluate.py). Counting it as 0.0 faked a regression
+        # against the shipped 0.828 macro-F1 for an identical model.
+        per_class_metrics[c_name] = {
+            "precision": None,
+            "recall": None,
+            "f1_score": None,
+            "support": 0
+        }
+        continue
     precision = round(tp / max(1, tp + fp), 4)
     recall = round(tp / max(1, tp + fn), 4)
     denom = precision + recall
@@ -296,6 +362,7 @@ manifest={
     "artifact_status":"candidate",
     "trained_at":datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
     "architecture":"MobileNetV2 transfer learning",
+    "inference_method":"five_crop_average",
     "training_device":torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     "mixed_precision":amp_enabled,
     "classes":train_ds.classes,
