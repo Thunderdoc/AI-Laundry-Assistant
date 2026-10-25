@@ -945,7 +945,11 @@ def analytics(request: Request):
     history=saved_history(request_uid(request))
     categories=[*labels(), NON_FABRIC, "unknown"]
     counts={name:sum(item["fabric"]==name for item in history) for name in categories}
-    return {"garments_analyzed":len(history),"most_detected_fabric":max(counts,key=counts.get) if history else None,"average_confidence":round(sum(item["confidence"] for item in history)/len(history),2) if history else None,"eco_recommendations":len(history),"distribution":counts,"note":"Analytics are derived only from stored predictions."}
+    # Audit P2: rejected ("unknown") scans used to inflate average_confidence
+    # and eco_recommendations. Averages count accepted scans only; records
+    # predating model_decision keep the legacy behavior (counted).
+    accepted=[item for item in history if (item.get("model_decision") or {}).get("accepted", True)]
+    return {"garments_analyzed":len(history),"most_detected_fabric":max(counts,key=counts.get) if history else None,"average_confidence":round(sum(item["confidence"] for item in accepted)/len(accepted),2) if accepted else None,"eco_recommendations":len(accepted),"distribution":counts,"note":"Analytics are derived only from stored predictions."}
 
 @app.get("/api/admin/overview")
 def admin_overview(request: Request):
@@ -998,10 +1002,11 @@ def admin_overview(request: Request):
     }
 
 @app.get("/api/admin/users")
-def admin_users(request: Request):
+def admin_users(request: Request, page_token: str | None = None, max_results: int = 100):
     require_admin(request)
+    max_results = max(1, min(1000, int(max_results)))
     try:
-        page=firebase_admin_auth_client().list_users(max_results=100)
+        page=firebase_admin_auth_client().list_users(max_results=max_results, page_token=page_token)
         users=[]
         for account in page.users:
             claims=account.custom_claims or {}
@@ -1017,7 +1022,7 @@ def admin_users(request: Request):
                 "created_at":account.user_metadata.creation_timestamp,
                 "last_sign_in_at":account.user_metadata.last_sign_in_timestamp,
             })
-        return {"count":len(users),"users":users,"next_page":bool(page.next_page_token)}
+        return {"count":len(users),"users":users,"next_page":bool(page.next_page_token),"next_page_token":page.next_page_token or None}
     except Exception as exc:
         raise HTTPException(503,"Could not load Firebase users.") from exc
 

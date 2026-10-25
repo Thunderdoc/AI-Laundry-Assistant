@@ -831,6 +831,41 @@ class TestP1Fixes(unittest.TestCase):
         self.assertNotEqual(other.status_code, 429)
 
 
+    def test_admin_users_supports_pagination(self):
+        from app import main as app_main
+        page = Mock()
+        page.users = []
+        page.next_page_token = "tok-2"
+        client = Mock()
+        client.list_users.return_value = page
+        with patch.object(app_main, "require_admin", return_value={"uid": "admin"}), \
+             patch.object(app_main, "firebase_admin_auth_client", return_value=client):
+            res = self.client.get("/api/admin/users?page_token=tok-1&max_results=10")
+        self.assertEqual(res.status_code, 200)
+        client.list_users.assert_called_once_with(max_results=10, page_token="tok-1")
+        self.assertEqual(res.json()["next_page_token"], "tok-2")
+        self.assertTrue(res.json()["next_page"])
+
+
+    def test_analytics_excludes_rejected_scans(self):
+        from app import main as app_main
+        # An earlier test class's teardown deletes the shared temp dir; this
+        # test runs first alphabetically in its class, so recreate it.
+        os.makedirs(os.path.dirname(app_main.DB_PATH), exist_ok=True)
+        accepted = {"id": 9001, "fabric": "cotton", "confidence": 90.0, "model_decision": {"accepted": True}}
+        rejected = {"id": 9002, "fabric": "unknown", "confidence": 30.0, "model_decision": {"accepted": False}}
+        with app_main.connection() as db:
+            for rec in (accepted, rejected):
+                db.execute("INSERT INTO predictions (owner_uid,created_at,fabric,confidence,payload) VALUES (?,?,?,?,?)", ("anon:analytics-test-uid", "2026-10-25T00:00:00Z", rec["fabric"], rec["confidence"], json.dumps(rec)))
+        res = self.client.get("/api/analytics", headers={"x-anonymous-id": "analytics-test-uid"})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["garments_analyzed"], 2)
+        self.assertEqual(data["average_confidence"], 90.0)
+        self.assertEqual(data["eco_recommendations"], 1)
+        self.assertEqual(data["distribution"]["unknown"], 1)
+
+
 class TestStorageFailover(unittest.TestCase):
     """Regression tests for the 2026-10-25 storage rebuild."""
 

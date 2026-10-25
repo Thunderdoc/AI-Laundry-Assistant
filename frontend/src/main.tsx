@@ -81,7 +81,6 @@ function AuthGate() {
     let authAttached = false;
     // The API can confirm the account afterwards; browser-side sign-in must not
     // depend on that round-trip succeeding.
-    let verifyWithBackend = false;
 
     // Registering the auth-state listener is what actually completes a sign-in
     // (it is the only thing that calls setUser). It must run for every usable
@@ -137,7 +136,12 @@ function AuthGate() {
                     lastLoginAt: new Date().toISOString(),
                   }), 4_000, "Profile sync timed out.").catch(() => undefined);
                 }
-                if (verifyWithBackend) {
+                // Always verify when a token exists (audit P2 race): gating
+                // this on a flag set by the settings fetch left admins
+                // non-admin for the whole session whenever auth attached
+                // first. A failed verification is non-fatal — the local
+                // account above stays in place.
+                if (idToken) {
                   const verified = await fetchWithTimeout(`${API}/auth/firebase`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -190,7 +194,6 @@ function AuthGate() {
             const backendWebConfig = backendConfig.firebase_config;
             if (backendConfig.enabled && backendWebConfig) {
               config = backendConfig;
-              verifyWithBackend = true;
               if (!firebaseWebConfigured) {
                 setSettings(config);
                 await attachAuth(backendWebConfig);
@@ -1291,27 +1294,44 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       )}
                     </div>
                     <div style={{ textAlign: "right" }}>
-                      <div
-                        style={{
-                          fontSize: "24px",
-                          fontWeight: 800,
-                          color: result.confidence >= 70 ? "var(--primary)" : "var(--warning)"
-                        }}
-                      >
-                        {result.confidence}%
-                      </div>
-                      <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-light)", textTransform: "uppercase" }}>
-                        {result.confidence >= 80 ? "High Confidence" : result.confidence >= 60 ? "Moderate Certainty" : "Low Confidence"}
-                      </span>
+                      {result.model_decision?.accepted ? (
+                        <>
+                          <div
+                            style={{
+                              fontSize: "24px",
+                              fontWeight: 800,
+                              color: result.confidence >= 70 ? "var(--primary)" : "var(--warning)"
+                            }}
+                          >
+                            {result.confidence}%
+                          </div>
+                          <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-light)", textTransform: "uppercase" }}>
+                            {result.confidence >= 80 ? "High Confidence" : result.confidence >= 60 ? "Moderate Certainty" : "Low Confidence"}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: "24px", fontWeight: 800, color: "var(--warning)" }}>
+                            Uncertain
+                          </div>
+                          <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-light)", textTransform: "uppercase" }}>
+                            No confident match
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
 
-                  {/* Confidence Bar */}
+                  {/* Confidence Bar — hidden for rejected results, where it
+                      would display a rejected guess's score as if it were
+                      confidence (audit P2). */}
+                  {result.model_decision?.accepted && (
                   <div className="confidence-meter-container">
                     <div className="confidence-bar-bg">
                       <div className="confidence-bar-fill" style={{ transform: `scaleX(${Math.min(100, Math.max(5, result.confidence)) / 100})` }}></div>
                     </div>
                   </div>
+                  )}
 
                   {/* Server-measured photo sharpness: blurry photos are the
                       model's weakest input (62.8% on blurred test photos), so
