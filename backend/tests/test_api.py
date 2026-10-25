@@ -336,7 +336,7 @@ class TestLaundryAIAPI(unittest.TestCase):
         bucket.blob.return_value = blob
         database_ref = Mock()
         database_ref.set.side_effect = RuntimeError("database offline")
-        with patch.object(firebase_store, "_bucket", return_value=bucket), patch.object(firebase_store, "_root", return_value=database_ref):
+        with patch.object(firebase_store, "_bucket", return_value=bucket), patch.object(firebase_store, "_root", return_value=database_ref), patch.dict(os.environ, {"FIREBASE_STORAGE_BUCKET": "test-bucket"}):
             with self.assertRaises(RuntimeError):
                 firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
         blob.upload_from_string.assert_called_once_with(b"jpeg", content_type="image/jpeg")
@@ -804,10 +804,79 @@ class TestP1Fixes(unittest.TestCase):
 
     def test_upload_failure_raises_instead_of_fake_saved(self):
         from app import firebase_store
-        with patch.object(firebase_store, "_storage_provider", return_value="supabase"), \
+        with patch.object(firebase_store, "_candidate_bucket_names", return_value=[]), \
+             patch.object(firebase_store, "_supabase_configured", return_value=True), \
              patch.object(firebase_store, "_supabase_upload", side_effect=RuntimeError("storage down")):
             with self.assertRaises(RuntimeError):
                 firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
+
+
+class TestStorageFailover(unittest.TestCase):
+    """Regression tests for the 2026-10-25 storage rebuild."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+
+    def _sample_image(self, color=(128, 128, 128)):
+        img = Image.new("RGB", (100, 100), color=color)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        return buf.getvalue()
+
+    def test_firebase_first_success_stamps_firebase(self):
+        from app import firebase_store
+        bucket = Mock()
+        blob = Mock()
+        bucket.blob.return_value = blob
+        database_ref = Mock()
+        with patch.object(firebase_store, "_candidate_bucket_names", return_value=["fb-bucket"]), \
+             patch.object(firebase_store, "_bucket", return_value=bucket), \
+             patch.object(firebase_store, "_root", return_value=database_ref), \
+             patch.object(firebase_store, "_supabase_upload") as sup_upload:
+            saved = firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
+        self.assertEqual(saved["storage_provider"], "firebase")
+        sup_upload.assert_not_called()
+        database_ref.set.assert_called_once()
+
+    def test_firebase_failure_falls_back_to_supabase(self):
+        from app import firebase_store
+        bucket = Mock()
+        blob = Mock()
+        bucket.blob.return_value = blob
+        blob.upload_from_string.side_effect = RuntimeError("bucket missing")
+        database_ref = Mock()
+        with patch.object(firebase_store, "_candidate_bucket_names", return_value=["fb-bucket"]), \
+             patch.object(firebase_store, "_bucket", return_value=bucket), \
+             patch.object(firebase_store, "_root", return_value=database_ref), \
+             patch.object(firebase_store, "_supabase_configured", return_value=True), \
+             patch.object(firebase_store, "_supabase_upload") as sup_upload:
+            saved = firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
+        self.assertEqual(saved["storage_provider"], "supabase")
+        sup_upload.assert_called_once()
+
+    def test_all_providers_down_raises(self):
+        from app import firebase_store
+        with patch.object(firebase_store, "_candidate_bucket_names", return_value=[]), \
+             patch.object(firebase_store, "_supabase_configured", return_value=False):
+            with self.assertRaises(RuntimeError):
+                firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
+
+    def test_delete_uses_stamped_provider(self):
+        from app import firebase_store
+        row = {"id": "p1", "owner_uid": "uid-1", "image_token": "private-uploads/uid-1/p1.jpg", "storage_provider": "supabase"}
+        ref = Mock()
+        ref.get.return_value = row
+        with patch.object(firebase_store, "_root", return_value=ref), \
+             patch.object(firebase_store, "_supabase_delete") as sup_del, \
+             patch.object(firebase_store, "_bucket") as bucket_mock:
+            self.assertTrue(firebase_store.delete_prediction("p1", "uid-1"))
+        sup_del.assert_called_once_with("private-uploads/uid-1/p1.jpg")
+        bucket_mock.assert_not_called()
 
     def test_local_delete_removes_photo_file(self):
         from app import main as app_main

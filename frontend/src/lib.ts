@@ -116,6 +116,39 @@ export type ImageAssessment = {
   isReady: boolean;
 };
 
+// Upload speed (2026-10-25): phone photos are often 4000px+ and megabytes,
+// but the model only needs a sharp crop — the server normalizes anyway.
+// Downscale to 1600px max before upload so slow networks stop being the
+// bottleneck. GIFs pass through untouched; PNGs get a white background
+// (opaque photos are unaffected). Any failure returns the original file.
+export async function downscaleImage(file: File, maxDimension = 1600): Promise<File | Blob> {
+  try {
+    if (!file.type.startsWith("image/") || file.type === "image/gif") return file;
+    const bitmap = await createImageBitmap(file);
+    const { width, height } = bitmap;
+    if (Math.max(width, height) <= maxDimension) {
+      bitmap.close();
+      return file;
+    }
+    const scale = maxDimension / Math.max(width, height);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    if (file.type === "image/png") {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+    return blob ?? file;
+  } catch {
+    return file;
+  }
+}
+
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);

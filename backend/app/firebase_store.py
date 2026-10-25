@@ -30,6 +30,76 @@ def _storage_provider() -> str:
     return "supabase" if _supabase_configured() else "firebase"
 
 
+# ---------------------------------------------------------------------------
+# Storage failover (rebuilt 2026-10-25): the live deploy's Supabase URL is
+# unreachable, so every image upload failed and cloud history was dead even
+# though the realtime database was fine. Images now try Firebase Storage
+# FIRST (its bucket name derives from the already-valid service account, no
+# new env var needed) and fall back to Supabase. Every record stamps the
+# provider that actually holds its bytes, so delete/feedback/review always
+# look in the right store even if the default flips later. Only when every
+# configured provider fails does the caller fall back to device-local saves.
+# ---------------------------------------------------------------------------
+
+def _provider_for(record: dict[str, Any] | None) -> str:
+    """Storage provider that owns a record (stamped at save; legacy = default)."""
+    provider = (record or {}).get("storage_provider")
+    return provider if provider in ("firebase", "supabase") else _storage_provider()
+
+
+def _upload_to(provider: str, path: str, content: bytes) -> None:
+    if provider == "supabase":
+        _supabase_upload(path, content)
+        return
+    global _ACTIVE_BUCKET_NAME
+    bucket = _bucket()
+    bucket.blob(path).upload_from_string(content, content_type="image/jpeg")
+    if not _ACTIVE_BUCKET_NAME and isinstance(bucket.name, str) and bucket.name:
+        _ACTIVE_BUCKET_NAME = bucket.name
+
+
+def _delete_from(provider: str, path: str) -> None:
+    if provider == "supabase":
+        _supabase_delete(path)
+    else:
+        _bucket().blob(path).delete()
+
+
+def _download_from(provider: str, path: str) -> bytes:
+    if provider == "supabase":
+        return _supabase_download(path)
+    return _bucket().blob(path).download_as_bytes()
+
+
+def _copy_within(provider: str, source: str, destination: str):
+    if provider == "supabase":
+        _supabase_copy(source, destination)
+        return None
+    bucket = _bucket()
+    return bucket.copy_blob(bucket.blob(source), bucket, destination)
+
+
+def upload_image(path: str, content: bytes) -> str:
+    """Upload image bytes, trying Firebase Storage first, then Supabase.
+
+    Returns the provider that accepted the bytes. Raises only when every
+    configured provider failed, so the caller can fall back honestly.
+    """
+    order = []
+    if _candidate_bucket_names():
+        order.append("firebase")
+    if _supabase_configured():
+        order.append("supabase")
+    errors = []
+    for provider in order:
+        try:
+            _upload_to(provider, path, content)
+            return provider
+        except Exception as exc:
+            errors.append(f"{provider}: {type(exc).__name__}")
+    raise RuntimeError("All image-storage providers failed: " + ("; ".join(errors) if errors else "none configured"))
+
+
 def _supabase_request(method: str, path: str, body: bytes | None = None, content_type: str | None = None) -> bytes:
     base = _value("SUPABASE_URL").rstrip("/")
     url = f"{base}/storage/v1/{path.lstrip('/')}"
@@ -304,6 +374,25 @@ def status(probe: bool = False) -> dict[str, Any]:
         except Exception as exc:
             storage_err = "storage_timeout" if isinstance(exc, TimeoutError) else type(exc).__name__
 
+        # Failover readiness: if the default store is down but Firebase
+        # Storage answers, uploads still succeed via failover — report it so
+        # a glance at /api/health shows whether the rebuild actually helps.
+        if not storage_ok and _storage_provider() == "supabase" and _candidate_bucket_names():
+            try:
+                def probe_fallback():
+                    from firebase_admin import storage
+                    for name in _candidate_bucket_names():
+                        try:
+                            b = storage.bucket(name=name, app=_app())
+                            if b.exists():
+                                return True
+                        except Exception:
+                            continue
+                    return False
+                state["storage_fallback_reachable"] = bool(call_with_timeout(probe_fallback, timeout=4.0))
+                state["storage_fallback_provider"] = "firebase"
+            except Exception:
+                state["storage_fallback_reachable"] = False
         state["database_reachable"] = db_ok
         state["storage_reachable"] = storage_ok
         state["database_error"] = db_err
@@ -339,28 +428,18 @@ def training_export_reference() -> dict[str, Any]:
 def create_prediction(owner_uid: str, record: dict[str, Any], jpeg: bytes) -> dict[str, Any]:
     record_id = uuid.uuid4().hex
     storage_path = f"private-uploads/{owner_uid}/{record_id}.jpg"
-    blob = None
-    try:
-        if _storage_provider() == "supabase":
-            _supabase_upload(storage_path, jpeg)
-        else:
-            blob = _bucket().blob(storage_path)
-            blob.upload_from_string(jpeg, content_type="image/jpeg")
-    except Exception:
-        # Audit P1-4: never persist a record whose photo failed to upload and
-        # report it saved — feedback on such a record 503s forever (its
-        # image_token is None). Raising lets predict fall into its local
-        # fallback path with an honest device-only badge instead.
-        raise
-    saved = {**record, "id": record_id, "image_token": storage_path, "owner_uid": owner_uid}
+    # Failover upload; a failed upload still raises instead of persisting a
+    # record whose photo is missing (audit P1-4), so predict falls into its
+    # local fallback path with an honest device-only badge instead.
+    provider = upload_image(storage_path, jpeg)
+    saved = {**record, "id": record_id, "image_token": storage_path, "owner_uid": owner_uid, "storage_provider": provider}
     try:
         _root(f"predictions/{record_id}").set(saved)
     except Exception:
-        if blob is not None:
-            try:
-                blob.delete()
-            except Exception:
-                pass
+        try:
+            _delete_from(provider, storage_path)
+        except Exception:
+            pass
         raise
     return saved
 
@@ -398,10 +477,7 @@ def delete_prediction(record_id: str, owner_uid: str) -> bool:
     token = row.get("image_token")
     if isinstance(token, str) and token.startswith("private-uploads/"):
         try:
-            if _storage_provider() == "supabase":
-                _supabase_delete(token)
-            else:
-                _bucket().blob(token).delete()
+            _delete_from(_provider_for(row), token)
         except Exception:
             pass
     _root(f"predictions/{record_id}").delete()
@@ -422,11 +498,10 @@ def submit_feedback(
     source_path = str(prediction["image_token"])
     filename = f"user_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{feedback_id[:6]}.jpg"
     pending_path = f"feedback-pending/{confirmed_fabric}/{filename}"
-    if _storage_provider() == "supabase":
-        _supabase_copy(source_path, pending_path)
-    else:
-        bucket = _bucket()
-        bucket.copy_blob(bucket.blob(source_path), bucket, pending_path)
+    # The photo lives in the prediction's stamped provider, not necessarily
+    # today's default — copy within that same store.
+    provider = _provider_for(prediction)
+    _copy_within(provider, source_path, pending_path)
     feedback = {
         "id": feedback_id,
         "prediction_id": str(prediction["id"]),
@@ -436,6 +511,7 @@ def submit_feedback(
         "was_correct": was_correct,
         "review_status": "pending",
         "storage_path": pending_path,
+        "storage_provider": provider,
         "filename": filename,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
@@ -454,10 +530,7 @@ def submit_feedback(
         })
     except Exception:
         try:
-            if _storage_provider() == "supabase":
-                _supabase_delete(pending_path)
-            else:
-                bucket.blob(pending_path).delete()
+            _delete_from(provider, pending_path)
         except Exception:
             pass
         raise
@@ -476,22 +549,18 @@ def feedback_image(feedback_id: str) -> bytes | None:
     item = _root(f"feedback/{feedback_id}").get()
     if not isinstance(item, dict) or not item.get("storage_path"):
         return None
-    return _supabase_download(item["storage_path"]) if _storage_provider() == "supabase" else _bucket().blob(item["storage_path"]).download_as_bytes()
+    return _download_from(_provider_for(item), item["storage_path"])
 
 
 def review_feedback(feedback_id: str, reviewer_uid: str, approved: bool) -> dict[str, Any] | None:
     item = _root(f"feedback/{feedback_id}").get()
     if not isinstance(item, dict) or item.get("review_status") != "pending":
         return None
-    bucket = None if _storage_provider() == "supabase" else _bucket()
-    source = None if bucket is None else bucket.blob(item["storage_path"])
+    provider = _provider_for(item)
     approved_blob = None
     if approved:
         approved_path = f"training-approved/{item['confirmed_fabric']}/{item['filename']}"
-        if _storage_provider() == "supabase":
-            _supabase_copy(item["storage_path"], approved_path)
-        else:
-            approved_blob = bucket.copy_blob(source, bucket, approved_path)
+        approved_blob = _copy_within(provider, item["storage_path"], approved_path)
         item["approved_storage_path"] = approved_path
     item.update({
         "review_status": "approved" if approved else "rejected",
@@ -525,10 +594,7 @@ def review_feedback(feedback_id: str, reviewer_uid: str, approved: bool) -> dict
                 pass
         raise
     try:
-        if _storage_provider() == "supabase":
-            _supabase_delete(item["storage_path"])
-        else:
-            source.delete()
+        _delete_from(provider, item["storage_path"])
     except Exception:
         pass
     return item

@@ -20,6 +20,7 @@ import {
   writeStoredToken,
   writeTempUnit,
   withTimeout,
+  downscaleImage,
   type Analytics,
   type DatasetStats,
   type FirebaseSettings,
@@ -747,7 +748,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     }
 
     const form = new FormData();
-    form.append("image", file);
+    form.append("image", await downscaleImage(file));
     const trimmedNote = note.trim();
     if (trimmedNote) {
       form.append("note", trimmedNote);
