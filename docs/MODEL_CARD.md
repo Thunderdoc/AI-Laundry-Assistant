@@ -53,15 +53,16 @@ called cotton). These numbers now live in the shipped manifest; the old
    were byte-identical copies of train images; they are denylisted in
    `data/quarantine_leaked/non_fabric/LEAKED_FILES.txt` and excluded by the
    train/evaluate scripts in the 2026-10-24 fix. The class now
-   has 46 train images and zero held-out images. Non-fabric rejection in the
+   has 46 train images on disk, of which 36 are actually used (10 denylisted
+   as leaked copies), and zero held-out images. Non-fabric rejection in the
    wild is unreliable until fresh non-fabric photos are collected.
 3. **Small, narrow training data.** Each fabric has only ~210–280 unique source
    photos (each expanded ×3 by Roboflow augmentation). Photos are mostly
    close-up texture crops; full garments, busy backgrounds, poor lighting and
    dark fabrics are under-represented, so real phone photos score worse than
    any lab number suggests.
-4. **Confusable classes.** The stale per-class metrics already showed silk
-   recall ~74% and wool recall ~77%; cotton/polyester/silk are the main
+4. **Confusable classes.** Current five-crop test recall is silk 83.7% and
+   wool 94.8%; cotton/polyester/silk are the main
    confusion pairs. A low-confidence or "unknown" answer on those fabrics is
    the system working as designed, not a bug to override.
 5. **Care guidance is generic.** It comes from documented fabric properties,

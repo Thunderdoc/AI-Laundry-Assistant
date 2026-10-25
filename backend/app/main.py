@@ -53,7 +53,10 @@ async def security_controls(request: Request, call_next):
     rule=_rate_rule(request)
     if rule:
         limit,window=rule
-        address=(request.headers.get("x-forwarded-for","").split(",")[-1].strip() or (request.client.host if request.client else "unknown"))
+        # Leftmost hop is the original client (audit P2). The old code took
+        # the LAST hop — the nearest proxy — so every user behind one proxy
+        # shared a single 30/min bucket and throttled each other.
+        address=(request.headers.get("x-forwarded-for","").split(",")[0].strip() or (request.client.host if request.client else "unknown"))
         key=f"{address}:{request.method}:{request.url.path}"
         now=time.monotonic()
         with _rate_lock:
@@ -245,6 +248,7 @@ def connection():
     db.row_factory = sqlite3.Row
     try:
         db.execute("CREATE TABLE IF NOT EXISTS predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_uid TEXT NOT NULL DEFAULT 'local-preview', created_at TEXT NOT NULL, fabric TEXT NOT NULL, confidence REAL NOT NULL, payload TEXT NOT NULL)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_predictions_owner_uid ON predictions(owner_uid)")
         db.execute("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, admin_uid TEXT NOT NULL, target_uid TEXT, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)")
         columns={row[1] for row in db.execute("PRAGMA table_info(predictions)")}
         if "owner_uid" not in columns:
@@ -431,13 +435,16 @@ def labels():
     return ordered if len(ordered)==len(FABRICS) else list(FABRICS)
 
 def decision_thresholds():
+    # Fail CLOSED (audit P2): a missing or partial manifest used to fall back
+    # to the old weak gates (0.35/0.08). The shipped strict gates are the only
+    # safe default — a broken manifest must reject more, never accept more.
     manifest=load_manifest()
-    min_confidence=manifest.get("min_confidence", 0.35)
-    min_margin=manifest.get("min_margin", 0.08)
+    min_confidence=manifest.get("min_confidence", 0.55)
+    min_margin=manifest.get("min_margin", 0.10)
     try: min_confidence=float(min_confidence)
-    except Exception: min_confidence=0.35
+    except Exception: min_confidence=0.55
     try: min_margin=float(min_margin)
-    except Exception: min_margin=0.08
+    except Exception: min_margin=0.10
     return max(0.0, min(1.0, min_confidence)), max(0.0, min(1.0, min_margin))
 
 def preprocess_config():

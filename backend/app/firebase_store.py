@@ -587,9 +587,16 @@ def review_feedback(feedback_id: str, reviewer_uid: str, approved: bool) -> dict
     try:
         _root("/").update(updates)
     except Exception:
+        # Roll back the approved copy whichever store holds it (audit P2:
+        # the Supabase path previously left the copy behind on DB failure).
         if approved_blob:
             try:
                 approved_blob.delete()
+            except Exception:
+                pass
+        elif approved:
+            try:
+                _delete_from(provider, approved_path)
             except Exception:
                 pass
         raise

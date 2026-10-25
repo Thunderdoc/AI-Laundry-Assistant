@@ -811,6 +811,26 @@ class TestP1Fixes(unittest.TestCase):
                 firebase_store.create_prediction("uid-1", {"fabric": "silk"}, b"jpeg")
 
 
+    def test_thresholds_fail_closed_on_partial_manifest(self):
+        from app import main as app_main
+        with patch.object(app_main, "load_manifest", return_value={}):
+            self.assertEqual(app_main.decision_thresholds(), (0.55, 0.10))
+        with patch.object(app_main, "load_manifest", return_value={"min_confidence": "bad", "min_margin": None}):
+            self.assertEqual(app_main.decision_thresholds(), (0.55, 0.10))
+        with patch.object(app_main, "load_manifest", return_value={"min_confidence": 0.70, "min_margin": 0.20}):
+            self.assertEqual(app_main.decision_thresholds(), (0.70, 0.20))
+
+    def test_rate_limit_keys_on_first_forwarded_hop(self):
+        headers = {"x-forwarded-for": "10.9.9.1, 5.6.7.8"}
+        for _ in range(30):
+            res = self.client.post("/api/feedback", json={}, headers=headers)
+            self.assertNotEqual(res.status_code, 429)
+        limited = self.client.post("/api/feedback", json={}, headers=headers)
+        self.assertEqual(limited.status_code, 429)
+        other = self.client.post("/api/feedback", json={}, headers={"x-forwarded-for": "10.9.9.2, 5.6.7.8"})
+        self.assertNotEqual(other.status_code, 429)
+
+
 class TestStorageFailover(unittest.TestCase):
     """Regression tests for the 2026-10-25 storage rebuild."""
 
