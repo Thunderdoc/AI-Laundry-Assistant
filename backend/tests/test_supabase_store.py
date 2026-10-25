@@ -62,11 +62,6 @@ class _FakeSupabase:
         url = request.full_url
         method = request.get_method()
         body = request.data
-        if "/storage/v1/object/remove/" in url:
-            prefixes = json.loads(body.decode("utf-8"))["prefixes"]
-            for prefix in prefixes:
-                self.storage.pop(prefix, None)
-            return _FakeResponse(b"{}")
         if "/storage/v1/object/" in url:
             path = url.split("/storage/v1/object/test-bucket/")[1]
             if method == "POST":
@@ -76,6 +71,11 @@ class _FakeSupabase:
                 if path not in self.storage:
                     raise RuntimeError("object not found")
                 return _FakeResponse(self.storage[path])
+            if method == "DELETE":
+                # Live-verified: DELETE on the object path is the real
+                # Supabase delete (POST remove forms do not delete).
+                self.storage.pop(path, None)
+                return _FakeResponse(b'{"message":"Successfully deleted"}')
         if "/storage/v1/bucket/" in url:
             return _FakeResponse(b"{}")
         table, query = self._table_and_query(url)

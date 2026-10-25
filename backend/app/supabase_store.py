@@ -152,12 +152,9 @@ def _storage_download(path: str) -> bytes:
 
 
 def _storage_delete(path: str) -> None:
-    _storage(
-        "POST",
-        f"object/remove/{_value('SUPABASE_BUCKET')}",
-        json.dumps({"prefixes": [path]}).encode("utf-8"),
-        "application/json",
-    )
+    # Live-verified 2026-10-25: DELETE on the object path (see firebase_store
+    # for the two POST forms that do NOT delete).
+    _storage("DELETE", f"object/{_value('SUPABASE_BUCKET')}/{path}")
 
 
 def _storage_copy(source: str, destination: str) -> None:

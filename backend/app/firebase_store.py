@@ -128,12 +128,11 @@ def _supabase_download(path: str) -> bytes:
 
 
 def _supabase_delete(path: str) -> None:
-    _supabase_request(
-        "POST",
-        f"object/remove/{_value('SUPABASE_BUCKET')}",
-        json.dumps({"prefixes": [path]}).encode("utf-8"),
-        "application/json",
-    )
+    # Live-verified 2026-10-25: Supabase Storage deletes via DELETE on the
+    # object path. The POST object/remove/{bucket} form 404s ("Bucket not
+    # found"), and POST object/{bucket}/remove uploads a junk object named
+    # "remove" instead of deleting — never use either form.
+    _supabase_request("DELETE", f"object/{_value('SUPABASE_BUCKET')}/{path}")
 
 
 def _supabase_copy(source: str, destination: str) -> None:
