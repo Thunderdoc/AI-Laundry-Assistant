@@ -13,7 +13,14 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from PIL import Image, ImageStat
 from .knowledge_base import FABRICS, recommendation
-from . import firebase_store
+from . import firebase_store, supabase_store
+
+# Persistence seam (Supabase fallback, 2026-10-25): prediction/feedback/audit
+# data + image storage go through `store`. Auth (Firebase tokens, admin
+# client) always stays on Firebase — only persistence moves. Supabase
+# activates only when PERSISTENCE_BACKEND=supabase; every other setup
+# behaves exactly as before.
+store = supabase_store if os.getenv("PERSISTENCE_BACKEND", "").strip().lower() == "supabase" else firebase_store
 
 load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
 app = FastAPI(title="LaundryAI API", version="0.1.0", description="Experimental fabric-care service. Predictions require an exported trained model.")
@@ -266,9 +273,9 @@ def record_audit(action: str, admin_uid: str, target_uid: str | None = None, met
         "metadata": metadata or {},
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            firebase_store.create_audit_event(event)
+            store.create_audit_event(event)
         except Exception as exc:
             raise HTTPException(503, "Could not write the administrator audit record.") from exc
         return
@@ -279,9 +286,9 @@ def record_audit(action: str, admin_uid: str, target_uid: str | None = None, met
         )
 
 def audit_events(limit: int = 100, offset: int = 0) -> list[dict]:
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            return firebase_store.list_audit_events(limit=limit, offset=offset)
+            return store.list_audit_events(limit=limit, offset=offset)
         except Exception as exc:
             raise HTTPException(503, "Cloud audit history is temporarily unavailable.") from exc
     with connection() as db:
@@ -324,10 +331,10 @@ def _cached_firebase_history() -> list[dict]:
     now = time.monotonic()
     if _RAW_HISTORY_CACHE["rows"] is not None and now < _RAW_HISTORY_CACHE["expires_at"]:
         return _RAW_HISTORY_CACHE["rows"]
-    if not firebase_store.configured():
+    if not store.configured():
         raise HTTPException(503, "Firebase persistence is selected but not fully configured.")
     try:
-        rows = firebase_store.call_with_timeout(firebase_store.list_predictions)
+        rows = store.call_with_timeout(store.list_predictions)
     except Exception as exc:
         raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     if _HISTORY_CACHE_TTL_SECONDS > 0:
@@ -345,7 +352,7 @@ def saved_history(owner_uid: str | None = None, limit: int | None = None):
     Callers that need everything (export, analytics, single-record lookup)
     pass no limit.
     """
-    if firebase_store.enabled():
+    if store.enabled():
         rows = _cached_firebase_history()
         if owner_uid is not None:
             rows = [row for row in rows if row.get("owner_uid") == owner_uid]
@@ -469,7 +476,7 @@ def health(probe: bool = True):
     # ?probe=false skips the network probes for a cheap liveness check; the
     # default keeps full probing for monitors like the keep-alive cron.
     state=model_status()
-    persistence=firebase_store.status(probe=probe)
+    persistence=store.status(probe=probe)
     healthy=state["ready"] and persistence["configured"] and persistence.get("reachable",True)
     return {"status":"ok" if healthy else "degraded", "model_ready":state["ready"], "model_error":state["error"], "persistence":persistence}
 
@@ -616,7 +623,7 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
     im.save(normalized_image, format="JPEG", quality=92, optimize=True)
     normalized_bytes=normalized_image.getvalue()
     image_token = f"upload_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
-    if not firebase_store.enabled():
+    if not store.enabled():
         upload_path = os.path.join(UPLOADS_DIR, image_token)
         try:
             with open(upload_path, "wb") as upload_file:
@@ -678,14 +685,14 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
         }
     }
     owner_uid=request_uid(request)
-    if firebase_store.enabled():
+    if store.enabled():
         persistence_warning=None
-        if not firebase_store.configured():
-            persistence_warning="Prediction completed, but cloud history is unavailable because Firebase persistence is not configured."
+        if not store.configured():
+            persistence_warning="Prediction completed, but cloud history is unavailable because cloud persistence is not configured."
         else:
             try:
-                record=firebase_store.call_with_timeout(
-                    lambda: firebase_store.create_prediction(owner_uid, record, normalized_bytes)
+                record=store.call_with_timeout(
+                    lambda: store.create_prediction(owner_uid, record, normalized_bytes)
                 )
                 _invalidate_history_cache()
             except Exception:
@@ -726,9 +733,9 @@ def feedback(request: Request, payload: dict = Body(...)):
     if not isinstance(pred_id, (int, str)) or not str(pred_id).strip() or not image_token:
         raise HTTPException(422, "Prediction id and image token are required.")
     owner_uid=request_uid(request)
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            rec=firebase_store.get_prediction(str(pred_id), owner_uid)
+            rec=store.get_prediction(str(pred_id), owner_uid)
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
     else:
@@ -739,9 +746,9 @@ def feedback(request: Request, payload: dict = Body(...)):
     if image_token != rec.get("image_token"):
         raise HTTPException(403, "Image token does not belong to this prediction.")
 
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            item=firebase_store.submit_feedback(rec, confirmed_fabric, was_correct)
+            item=store.submit_feedback(rec, confirmed_fabric, was_correct)
             _invalidate_history_cache()
         except Exception as exc:
             raise HTTPException(503, "Could not store feedback securely.") from exc
@@ -803,9 +810,9 @@ def local_dataset_stats():
 def dataset_stats():
     result=local_dataset_stats()
     stats=result["classes"]
-    if firebase_store.enabled() and firebase_store.configured():
+    if store.enabled() and store.configured():
         try:
-            for item, count in firebase_store.approved_counts().items():
+            for item, count in store.approved_counts().items():
                 if item in stats:
                     stats[item]["total"] += count
                     stats[item]["user_verified"] += count
@@ -834,9 +841,9 @@ def update_history_note(record_id:str, request: Request, payload:dict=Body(...))
         if len(new_note)>240: raise HTTPException(422,"Note cannot exceed 240 characters.")
         if not new_note: new_note=None
     owner_uid=request_uid(request)
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            data=firebase_store.update_prediction(record_id,owner_uid,{"note":new_note})
+            data=store.update_prediction(record_id,owner_uid,{"note":new_note})
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
         if not data: raise HTTPException(404,"Analysis not found")
@@ -869,9 +876,9 @@ def _delete_local_upload(image_token):
 
 @app.delete("/api/history/{record_id}")
 def delete_history(record_id:str, request: Request):
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            deleted=firebase_store.delete_prediction(record_id,request_uid(request))
+            deleted=store.delete_prediction(record_id,request_uid(request))
         except Exception as exc:
             raise HTTPException(503, "Cloud database is temporarily unavailable.") from exc
         if not deleted: raise HTTPException(404,"Analysis not found")
@@ -922,9 +929,9 @@ def export_history_csv(request: Request):
 
 @app.delete("/api/history")
 def clear_history(request: Request):
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            count=firebase_store.clear_predictions(request_uid(request))
+            count=store.clear_predictions(request_uid(request))
             _invalidate_history_cache()
             return {"deleted":True,"count":count}
         except Exception as exc:
@@ -958,7 +965,7 @@ def admin_overview(request: Request):
     training=training_configuration()
     # Health already performs the network probe. The admin overview must load
     # promptly even while Firebase is down or credentials are being repaired.
-    persistence=firebase_store.status(probe=False)
+    persistence=store.status(probe=False)
     warnings_list=[]
     try:
         history=saved_history()
@@ -1150,9 +1157,9 @@ def admin_audit_log(request: Request, page: int = 1, page_size: int = 100):
     page_size = max(1, min(page_size, 500))
     offset = (page - 1) * page_size
     items = audit_events(page_size, offset)
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            total = firebase_store.count_audit_events()
+            total = store.count_audit_events()
         except Exception as exc:
             raise HTTPException(503, "Cloud audit history is temporarily unavailable.") from exc
     else:
@@ -1167,9 +1174,9 @@ def admin_feedback(request: Request, page: int = 1, page_size: int = 100, status
     page_size = max(1, min(page_size, 500))
     if status not in {"pending", "approved", "rejected", "all"}:
         raise HTTPException(422, "Invalid feedback status.")
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            items=firebase_store.list_feedback("" if status == "all" else status)
+            items=store.list_feedback("" if status == "all" else status)
         except Exception as exc:
             raise HTTPException(503, "Cloud feedback queue is temporarily unavailable.") from exc
         if fabric:
@@ -1199,9 +1206,9 @@ def admin_feedback(request: Request, page: int = 1, page_size: int = 100, status
 def admin_feedback_image(fabric_name: str, filename: str, request: Request):
     require_admin(request)
     if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            content=firebase_store.feedback_image(os.path.basename(filename))
+            content=store.feedback_image(os.path.basename(filename))
         except Exception as exc:
             raise HTTPException(503, "Could not load the protected feedback image.") from exc
         if content is None: raise HTTPException(404,"Pending feedback image not found.")
@@ -1243,9 +1250,9 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
     admin=require_admin(request)
     if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
     safe_name=os.path.basename(filename)
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            item=firebase_store.review_feedback(safe_name,str(admin.get("uid")),True)
+            item=store.review_feedback(safe_name,str(admin.get("uid")),True)
         except Exception as exc:
             raise HTTPException(503, "Could not approve this feedback item.") from exc
         if not item: raise HTTPException(404,"Pending feedback image not found.")
@@ -1265,9 +1272,9 @@ def approve_feedback(fabric_name: str, filename: str, request: Request):
 def reject_feedback(fabric_name: str, filename: str, request: Request):
     admin=require_admin(request)
     if fabric_name not in FABRICS and fabric_name != NON_FABRIC: raise HTTPException(422,"Invalid fabric label.")
-    if firebase_store.enabled():
+    if store.enabled():
         try:
-            item=firebase_store.review_feedback(os.path.basename(filename),str(admin.get("uid")),False)
+            item=store.review_feedback(os.path.basename(filename),str(admin.get("uid")),False)
         except Exception as exc:
             raise HTTPException(503, "Could not reject this feedback item.") from exc
         if not item: raise HTTPException(404,"Pending feedback image not found.")
@@ -1386,7 +1393,7 @@ def training_configuration() -> dict:
     accelerator=local_accelerator_capability()
 
     if external_url:
-        export=firebase_store.training_export_reference()
+        export=store.training_export_reference()
         missing=[]
         if not callback_base: missing.append("PUBLIC_API_URL")
         if not callback_token: missing.append("TRAINING_CALLBACK_TOKEN")
@@ -1443,7 +1450,7 @@ def _run_training_job():
                 "project":"laundryai",
                 "request_id":request_id,
                 "requested_at":_utc_now(),
-                "dataset":firebase_store.training_export_reference(),
+                "dataset":store.training_export_reference(),
                 "callback_url":f"{callback_base}/api/training/callback",
                 "required_metrics":["test_accuracy","macro_f1","per_class_recall","confusion_matrix"],
             }).encode("utf-8")
