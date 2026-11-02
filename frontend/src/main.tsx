@@ -2,7 +2,7 @@ import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode 
 import { useReducedMotion } from "motion/react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
-import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, GoogleAuthProvider, inMemoryPersistence, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signOut, type Auth } from "firebase/auth";
+import { browserSessionPersistence, createUserWithEmailAndPassword, getAuth, getRedirectResult, GoogleAuthProvider, inMemoryPersistence, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, type Auth } from "firebase/auth";
 import { getDatabase, ref, set } from "firebase/database";
 import { MotionButton, MotionDiv, MotionPage, MotionSection, Reveal, TextEffect } from "./motion-primitives";
 import {
@@ -91,6 +91,17 @@ function AuthGate() {
       const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
       const auth = getAuth(app);
       await persistSession(auth);
+      if (disposed) return;
+      // Complete a redirect sign-in (the popup-blocked fallback below). A
+      // failed redirect — e.g. an unauthorized domain — is otherwise
+      // completely silent, so surface its error on the login screen.
+      try {
+        await getRedirectResult(auth);
+      } catch (error) {
+        if (!disposed) {
+          setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Google sign-in was interrupted — try again.");
+        }
+      }
       if (disposed) return;
       let rejectRestoredAccount = !hasAuthSession();
       unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
@@ -229,7 +240,19 @@ function AuthGate() {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
       triggerAuthSession();
-      await signInWithPopup(auth, provider);
+      try {
+        await signInWithPopup(auth, provider);
+      } catch (popupError) {
+        const code = (popupError as { code?: string })?.code ?? "";
+        // A blocked or broken popup (browser popup blocker, ad-blocker,
+        // in-app webview, opener communication cut off) must never dead-end
+        // sign-in: fall back to the full-page redirect flow, which no popup
+        // blocker can stop. On return, getRedirectResult (in attachAuth)
+        // plus the auth-state listener complete the sign-in.
+        if (code !== "auth/popup-blocked" && code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") throw popupError;
+        setAuthNotice("Popup was blocked — taking you to Google to sign in…");
+        await signInWithRedirect(auth, provider);
+      }
     } catch (error) {
       if (!hadExplicitSession) clearAuthSession();
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Google sign-in was cancelled or failed.");

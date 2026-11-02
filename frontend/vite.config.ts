@@ -1,8 +1,14 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    // The login regression tests drive the real DOM; without this, vitest
+    // defaults to the node environment and the suite dies on `window`.
+    environment: "jsdom",
+  },
   server: {
     // Bind on all interfaces so sandbox/preview proxies (and LAN devices) can
     // reach the dev server. Vite 8's host allowlist must include the generated

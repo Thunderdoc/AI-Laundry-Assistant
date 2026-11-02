@@ -57,6 +57,9 @@ const mocks = vi.hoisted(() => {
     persistenceCalls: [] as unknown[],
     signInCalls: [] as { email: string; password: string }[],
     googleCalls: 0,
+    redirectCalls: 0,
+    popupError: null as Error | null,
+    redirectResultError: null as Error | null,
     signedInUser: null as Record<string, unknown> | null,
     fetchImpl: ((_input: RequestInfo | URL, _init?: RequestInit) => Promise<Response>) as (
       input: RequestInfo | URL,
@@ -115,8 +118,16 @@ vi.mock("firebase/auth", () => {
     }),
     signInWithPopup: vi.fn(async () => {
       mocks.googleCalls += 1;
+      if (mocks.popupError) throw mocks.popupError;
       queueMicrotask(() => emit(fakeUser()));
       return { user: fakeUser() };
+    }),
+    signInWithRedirect: vi.fn(async () => {
+      mocks.redirectCalls += 1;
+    }),
+    getRedirectResult: vi.fn(async () => {
+      if (mocks.redirectResultError) throw mocks.redirectResultError;
+      return null;
     }),
     signOut: vi.fn(async () => {
       queueMicrotask(() => emit(null));
@@ -193,6 +204,9 @@ beforeEach(() => {
   mocks.persistenceCalls = [];
   mocks.signInCalls = [];
   mocks.googleCalls = 0;
+  mocks.redirectCalls = 0;
+  mocks.popupError = null;
+  mocks.redirectResultError = null;
   mocks.signedInUser = null;
   mocks.fetchImpl = () => Promise.reject(new TypeError("Failed to fetch"));
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => mocks.fetchImpl(input, init));
@@ -288,6 +302,43 @@ describe("AuthGate login", () => {
     expect(mocks.persistenceCalls[mocks.persistenceCalls.length - 1]).toBe("in-memory");
 
     vi.restoreAllMocks();
+  });
+
+  it("falls back to redirect sign-in when the Google popup is blocked", async () => {
+    // Regression (owner report, 2026-11-02): with popups allowed the browser
+    // still killed the Firebase popup (auth/popup-blocked) and sign-in
+    // dead-ended on the error. A blocked/broken popup must fall back to the
+    // full-page redirect flow instead of stranding the user.
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "web-api-key");
+    vi.stubEnv("VITE_FIREBASE_AUTH_DOMAIN", "demo.firebaseapp.com");
+    vi.stubEnv("VITE_FIREBASE_PROJECT_ID", "demo");
+    vi.stubEnv("VITE_FIREBASE_APP_ID", "1:1:web:1");
+    mocks.popupError = Object.assign(new Error("Firebase: Error (auth/popup-blocked)."), { code: "auth/popup-blocked" });
+
+    await loadApp();
+    await waitFor(() => expect(mocks.listeners.length).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByText("Continue with Google"));
+
+    await waitFor(() => expect(mocks.redirectCalls).toBe(1));
+    expect(mocks.googleCalls).toBe(1);
+    expect(await screen.findByText(/taking you to Google to sign in/)).toBeTruthy();
+    expect(screen.queryByText(/auth\/popup-blocked/)).toBeNull();
+  });
+
+  it("surfaces a failed redirect sign-in instead of failing silently", async () => {
+    // The redirect fallback returns to the app via getRedirectResult; its
+    // errors (e.g. auth/unauthorized-domain) used to vanish without a trace.
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "web-api-key");
+    vi.stubEnv("VITE_FIREBASE_AUTH_DOMAIN", "demo.firebaseapp.com");
+    vi.stubEnv("VITE_FIREBASE_PROJECT_ID", "demo");
+    vi.stubEnv("VITE_FIREBASE_APP_ID", "1:1:web:1");
+    mocks.redirectResultError = Object.assign(new Error("Firebase: Error (auth/unauthorized-domain)."), { code: "auth/unauthorized-domain" });
+
+    await loadApp();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByText(/unauthorized-domain/)).toBeTruthy();
   });
 
   it("still offers guest access when Firebase is not configured at all", async () => {
