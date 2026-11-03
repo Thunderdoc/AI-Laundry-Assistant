@@ -58,6 +58,10 @@ const mocks = vi.hoisted(() => {
     signInCalls: [] as { email: string; password: string }[],
     googleCalls: 0,
     redirectCalls: 0,
+    signOutCalls: 0,
+    currentUser: null as Record<string, unknown> | null,
+    popupLandsUser: false,
+    emitRestoredOnAttach: false,
     popupError: null as Error | null,
     redirectResultError: null as Error | null,
     signedInUser: null as Record<string, unknown> | null,
@@ -95,19 +99,29 @@ vi.mock("firebase/auth", () => {
       getIdToken: async () => "header." + btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })) + ".sig",
     };
   return {
-    getAuth: () => ({ currentUser: null }),
+    getAuth: () => ({
+      get currentUser() {
+        return mocks.currentUser;
+      },
+    }),
     setPersistence: vi.fn(async (_auth: unknown, persistence: unknown) => {
       mocks.persistenceCalls.push(persistence);
     }),
     onAuthStateChanged: vi.fn((_auth: unknown, listener: (user: unknown) => void) => {
       mocks.listeners.push(listener);
-      listener(null);
+      if (mocks.emitRestoredOnAttach) {
+        mocks.currentUser = fakeUser();
+        listener(fakeUser());
+      } else {
+        listener(null);
+      }
       return () => {
         mocks.listeners = mocks.listeners.filter((item) => item !== listener);
       };
     }),
     signInWithEmailAndPassword: vi.fn(async (_auth: unknown, email: string, password: string) => {
       mocks.signInCalls.push({ email, password });
+      mocks.currentUser = fakeUser();
       queueMicrotask(() => emit(fakeUser()));
       return { user: fakeUser() };
     }),
@@ -118,7 +132,16 @@ vi.mock("firebase/auth", () => {
     }),
     signInWithPopup: vi.fn(async () => {
       mocks.googleCalls += 1;
-      if (mocks.popupError) throw mocks.popupError;
+      if (mocks.popupError) {
+        if (mocks.popupLandsUser) {
+          // The sign-in actually landed (listener has the user) even though
+          // the popup promise reports an error — a known spurious failure.
+          mocks.currentUser = fakeUser();
+          queueMicrotask(() => emit(fakeUser()));
+        }
+        throw mocks.popupError;
+      }
+      mocks.currentUser = fakeUser();
       queueMicrotask(() => emit(fakeUser()));
       return { user: fakeUser() };
     }),
@@ -130,6 +153,8 @@ vi.mock("firebase/auth", () => {
       return null;
     }),
     signOut: vi.fn(async () => {
+      mocks.signOutCalls += 1;
+      mocks.currentUser = null;
       queueMicrotask(() => emit(null));
     }),
     sendEmailVerification: vi.fn(async () => undefined),
@@ -205,6 +230,10 @@ beforeEach(() => {
   mocks.signInCalls = [];
   mocks.googleCalls = 0;
   mocks.redirectCalls = 0;
+  mocks.signOutCalls = 0;
+  mocks.currentUser = null;
+  mocks.popupLandsUser = false;
+  mocks.emitRestoredOnAttach = false;
   mocks.popupError = null;
   mocks.redirectResultError = null;
   mocks.signedInUser = null;
@@ -339,6 +368,49 @@ describe("AuthGate login", () => {
     await loadApp();
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByText(/unauthorized-domain/)).toBeTruthy();
+  });
+
+  it("accepts a restored Firebase session instead of signing it back out", async () => {
+    // Regression (owner report, 2026-11-03): sign-in LOOPED — after choosing
+    // the Google account the app returned to the sign-in page, again and
+    // again. Cause: a session restored by Firebase (e.g. on return from the
+    // redirect flow) was signed straight back out whenever a tab-session flag
+    // was missing. A Firebase-authenticated user is signed in, period.
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "web-api-key");
+    vi.stubEnv("VITE_FIREBASE_AUTH_DOMAIN", "demo.firebaseapp.com");
+    vi.stubEnv("VITE_FIREBASE_PROJECT_ID", "demo");
+    vi.stubEnv("VITE_FIREBASE_APP_ID", "1:1:web:1");
+    mocks.emitRestoredOnAttach = true;
+
+    await loadApp();
+    expect(await screen.findByText("Sign out")).toBeTruthy();
+    expect(screen.getByText("Ada")).toBeTruthy();
+    expect(mocks.signOutCalls).toBe(0);
+  });
+
+  it("does not redirect or error when the popup reports an error but the sign-in landed", async () => {
+    // The popup promise can reject with auth/popup-closed-by-user even when
+    // Google completed and the auth listener already has the user. Bouncing
+    // that into the redirect flow (and clearing the session flag on the way)
+    // produced the same sign-in loop.
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "web-api-key");
+    vi.stubEnv("VITE_FIREBASE_AUTH_DOMAIN", "demo.firebaseapp.com");
+    vi.stubEnv("VITE_FIREBASE_PROJECT_ID", "demo");
+    vi.stubEnv("VITE_FIREBASE_APP_ID", "1:1:web:1");
+    mocks.popupError = Object.assign(new Error("Firebase: Error (auth/popup-closed-by-user)."), { code: "auth/popup-closed-by-user" });
+    mocks.popupLandsUser = true;
+
+    await loadApp();
+    await waitFor(() => expect(mocks.listeners.length).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByText("Continue with Google"));
+
+    expect(await screen.findByText("Sign out")).toBeTruthy();
+    expect(mocks.googleCalls).toBe(1);
+    expect(mocks.redirectCalls).toBe(0);
+    expect(mocks.signOutCalls).toBe(0);
+    expect(screen.queryByText(/popup-closed-by-user/)).toBeNull();
   });
 
   it("still offers guest access when Firebase is not configured at all", async () => {

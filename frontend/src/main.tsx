@@ -103,19 +103,17 @@ function AuthGate() {
         }
       }
       if (disposed) return;
-      let rejectRestoredAccount = !hasAuthSession();
+      // A Firebase-authenticated user is accepted as signed in — including a
+      // session restored on return from the redirect flow. An earlier version
+      // signed such users straight back out when a tab-session flag was
+      // missing (storage blocked or cleared), which trapped real users in a
+      // sign-in → sign-out loop. Firebase's own session is the authority.
       unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
         void (async () => {
           try {
             if (!firebaseUser) {
               clearStoredToken();
               setUser(null);
-              return;
-            }
-            if (rejectRestoredAccount && !hasAuthSession()) {
-              rejectRestoredAccount = false;
-              await signOut(auth);
-              setAuthNotice("Choose the Google or email account you want to use for this session.");
               return;
             }
             const passwordAccount = firebaseUser.providerData.some((provider) => provider.providerId === "password");
@@ -233,9 +231,10 @@ function AuthGate() {
     setAuthError("");
     setIsSigningIn(true);
     const hadExplicitSession = hasAuthSession();
+    let auth: Auth | undefined;
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
-      const auth = getAuth(app);
+      auth = getAuth(app);
       await persistSession(auth);
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
@@ -250,11 +249,17 @@ function AuthGate() {
         // blocker can stop. On return, getRedirectResult (in attachAuth)
         // plus the auth-state listener complete the sign-in.
         if (code !== "auth/popup-blocked" && code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") throw popupError;
+        // The popup can also report an error when the sign-in actually
+        // landed (the auth listener already has the user). Give the auth
+        // state a moment to settle, and never tear down a live session or
+        // bounce it into a redirect — that was a sign-in loop.
+        if (!auth.currentUser) await new Promise((resolve) => setTimeout(resolve, 300));
+        if (auth.currentUser) return;
         setAuthNotice("Popup was blocked — taking you to Google to sign in…");
         await signInWithRedirect(auth, provider);
       }
     } catch (error) {
-      if (!hadExplicitSession) clearAuthSession();
+      if (!hadExplicitSession && !auth?.currentUser) clearAuthSession();
       setAuthError(error instanceof Error ? error.message.replace("Firebase: ", "") : "Google sign-in was cancelled or failed.");
     } finally {
       setIsSigningIn(false);
