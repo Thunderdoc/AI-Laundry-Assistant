@@ -235,19 +235,19 @@ function AuthGate() {
     try {
       const app = getApps().length ? getApp() : initializeApp(settings.firebase_config);
       auth = getAuth(app);
-      await persistSession(auth);
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
       triggerAuthSession();
       try {
+        // Open the popup FIRST, synchronously inside the click: any await
+        // before signInWithPopup (this handler used to await setPersistence)
+        // spends the browser's user-activation window, and Chrome then
+        // blocks the popup as not user-initiated — auth/popup-blocked even
+        // with popups allowed. Session persistence is already applied by
+        // attachAuth at boot, before the login screen can be used.
         await signInWithPopup(auth, provider);
       } catch (popupError) {
         const code = (popupError as { code?: string })?.code ?? "";
-        // A blocked or broken popup (browser popup blocker, ad-blocker,
-        // in-app webview, opener communication cut off) must never dead-end
-        // sign-in: fall back to the full-page redirect flow, which no popup
-        // blocker can stop. On return, getRedirectResult (in attachAuth)
-        // plus the auth-state listener complete the sign-in.
         if (code !== "auth/popup-blocked" && code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") throw popupError;
         // The popup can also report an error when the sign-in actually
         // landed (the auth listener already has the user). Give the auth
@@ -255,6 +255,16 @@ function AuthGate() {
         // bounce it into a redirect — that was a sign-in loop.
         if (!auth.currentUser) await new Promise((resolve) => setTimeout(resolve, 300));
         if (auth.currentUser) return;
+        if (code !== "auth/popup-blocked") {
+          // The popup itself is the primary flow: a popup the user (or the
+          // browser) closed mid-way is a retry, not a redirect bounce.
+          setAuthError("The sign-in popup closed before finishing — tap Continue with Google again.");
+          return;
+        }
+        // Only a genuinely blocked popup falls back to the full-page
+        // redirect flow, which no popup blocker can stop. On return,
+        // getRedirectResult (in attachAuth) plus the auth-state listener
+        // complete the sign-in.
         setAuthNotice("Popup was blocked — taking you to Google to sign in…");
         await signInWithRedirect(auth, provider);
       }

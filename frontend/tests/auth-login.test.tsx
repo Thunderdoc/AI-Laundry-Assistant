@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => {
     currentUser: null as Record<string, unknown> | null,
     popupLandsUser: false,
     emitRestoredOnAttach: false,
+    persistenceHangs: false,
     popupError: null as Error | null,
     redirectResultError: null as Error | null,
     signedInUser: null as Record<string, unknown> | null,
@@ -104,8 +105,10 @@ vi.mock("firebase/auth", () => {
         return mocks.currentUser;
       },
     }),
-    setPersistence: vi.fn(async (_auth: unknown, persistence: unknown) => {
+    setPersistence: vi.fn((_auth: unknown, persistence: unknown) => {
       mocks.persistenceCalls.push(persistence);
+      if (mocks.persistenceHangs) return new Promise(() => {});
+      return Promise.resolve();
     }),
     onAuthStateChanged: vi.fn((_auth: unknown, listener: (user: unknown) => void) => {
       mocks.listeners.push(listener);
@@ -234,6 +237,7 @@ beforeEach(() => {
   mocks.currentUser = null;
   mocks.popupLandsUser = false;
   mocks.emitRestoredOnAttach = false;
+  mocks.persistenceHangs = false;
   mocks.popupError = null;
   mocks.redirectResultError = null;
   mocks.signedInUser = null;
@@ -411,6 +415,51 @@ describe("AuthGate login", () => {
     expect(mocks.redirectCalls).toBe(0);
     expect(mocks.signOutCalls).toBe(0);
     expect(screen.queryByText(/popup-closed-by-user/)).toBeNull();
+  });
+
+  it("opens the Google popup without waiting for persistence work", async () => {
+    // Regression (owner report, 2026-11-03): "Popup was blocked" even with
+    // popups allowed. The click handler awaited setPersistence BEFORE
+    // signInWithPopup; that await spends the browser's user-activation
+    // window, so Chrome treats the popup as not user-initiated and blocks
+    // it. The popup must be the first thing the click opens.
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "web-api-key");
+    vi.stubEnv("VITE_FIREBASE_AUTH_DOMAIN", "demo.firebaseapp.com");
+    vi.stubEnv("VITE_FIREBASE_PROJECT_ID", "demo");
+    vi.stubEnv("VITE_FIREBASE_APP_ID", "1:1:web:1");
+
+    await loadApp();
+    await waitFor(() => expect(mocks.listeners.length).toBe(1));
+
+    // Persistence now never resolves; the click must not wait for it.
+    mocks.persistenceHangs = true;
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByText("Continue with Google"));
+
+    await waitFor(() => expect(mocks.googleCalls).toBe(1));
+    expect(await screen.findByText("Sign out")).toBeTruthy();
+  });
+
+  it("asks for a retry instead of redirecting when the popup closes early", async () => {
+    // The popup is the primary flow: a popup closed before finishing (by the
+    // user or the browser) must offer a simple retry on the same screen, not
+    // bounce the page into the redirect flow.
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "web-api-key");
+    vi.stubEnv("VITE_FIREBASE_AUTH_DOMAIN", "demo.firebaseapp.com");
+    vi.stubEnv("VITE_FIREBASE_PROJECT_ID", "demo");
+    vi.stubEnv("VITE_FIREBASE_APP_ID", "1:1:web:1");
+    mocks.popupError = Object.assign(new Error("Firebase: Error (auth/popup-closed-by-user)."), { code: "auth/popup-closed-by-user" });
+
+    await loadApp();
+    await waitFor(() => expect(mocks.listeners.length).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(screen.getByText("Continue with Google"));
+
+    expect(await screen.findByText(/popup closed before finishing/)).toBeTruthy();
+    expect(mocks.googleCalls).toBe(1);
+    expect(mocks.redirectCalls).toBe(0);
+    expect(screen.queryByText("Sign out")).toBeNull();
   });
 
   it("still offers guest access when Firebase is not configured at all", async () => {
