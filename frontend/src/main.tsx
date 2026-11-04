@@ -61,6 +61,7 @@ import CareSymbols, {
   IconWash,
 } from "./components/CareSymbols";
 import { buildShareCareText, buildSpokenCareText, type CareSummaryInput, type CareTextLabels } from "./careText";
+import { SAMPLE_IMAGES, sampleImageFile, type SampleImage } from "./sampleImages";
 import HistoryPage from "./components/HistoryPage";
 import "./style.css";
 
@@ -70,17 +71,9 @@ import "./style.css";
 const AdminConsole = lazy(() => import("./components/AdminConsole"));
 const LoadBuilderPage = lazy(() => import("./components/LoadBuilderPage"));
 
-// Bundled sample photos (extra features, 2026-11-04): one per class, drawn
-// from the project's own held-out test split (data/test) and verified
-// through the real predict path before bundling — see EXTRA-FEATURES.md for
-// the measured prediction of each file. Clicking one runs the exact same
-// analyze() flow as an uploaded photo.
-const SAMPLE_PHOTOS = [
-  { id: "cotton", src: "/samples/sample-cotton.jpg", label: "Cotton" },
-  { id: "denim", src: "/samples/sample-denim.jpg", label: "Denim" },
-  { id: "silk", src: "/samples/sample-silk.jpg", label: "Silk" },
-  { id: "wool", src: "/samples/sample-wool.jpg", label: "Wool" },
-] as const;
+// Sample photos for the picker live in ./sampleImages, embedded as data
+// URLs: the JPGs cannot reach the repo as binary files (the GitHub push
+// carries text only), so fetching the samples as separate files 404'd live.
 
 const firebaseWebConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -1017,19 +1010,15 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     }
   };
 
-  // Fetch a bundled sample and run it through the exact same path as an
-  // uploaded photo: onFileChange (preview, quality check, state reset),
-  // then analyze() with that File (downscale → health probe → /predict).
-  const runSample = async (sample: (typeof SAMPLE_PHOTOS)[number]) => {
+  // Run an embedded sample through the exact same path as an uploaded
+  // photo: the data URL is decoded back into a File, then onFileChange
+  // (preview, quality check, state reset) and analyze() with that File
+  // (downscale → health probe → /predict).
+  const runSample = async (sample: SampleImage) => {
     if (isAnalyzing || sampleLoading) return;
     setSampleLoading(sample.id);
     try {
-      const response = await fetch(sample.src);
-      if (!response.ok) throw new Error(`sample fetch ${response.status}`);
-      const blob = await response.blob();
-      const sampleFile = new File([blob], `sample-${sample.id}.jpg`, {
-        type: blob.type || "image/jpeg",
-      });
+      const sampleFile = sampleImageFile(sample);
       onFileChange(sampleFile);
       await analyze(sampleFile);
     } catch {
@@ -1352,15 +1341,16 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 onChange={(e) => onFileChange(e.target.files?.[0])}
               />
 
-              {/* Sample picker (extra features, 2026-11-04): bundled photos
-                  from the project's own test split, each verified through
-                  the real predict path before bundling. Clicking one runs
-                  the same analyze() flow as an upload — no parallel code. */}
+              {/* Sample picker (extra features, 2026-11-04): photos from
+                  the project's own test split, embedded as data URLs in
+                  sampleImages.ts, each verified through the real predict
+                  path before bundling. Clicking one runs the same
+                  analyze() flow as an upload — no parallel code. */}
               {!stream && (
                 <div className="sample-picker">
                   <span className="sample-picker-label">{t("analyze.samples")}</span>
                   <div className="sample-thumbs">
-                    {SAMPLE_PHOTOS.map((sample) => (
+                    {SAMPLE_IMAGES.map((sample) => (
                       <button
                         key={sample.id}
                         type="button"
@@ -1369,7 +1359,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                         onClick={() => void runSample(sample)}
                         aria-label={`${t("analyze.samples")}: ${sample.label}`}
                       >
-                        <img src={sample.src} alt="" loading="lazy" />
+                        <img src={sample.dataUrl} alt="" loading="lazy" />
                         <span>{sampleLoading === sample.id ? t("common.loading") : sample.label}</span>
                       </button>
                     ))}
