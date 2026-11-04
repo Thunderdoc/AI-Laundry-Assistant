@@ -10,6 +10,7 @@ import {
 } from "../lib";
 import { FABRICS_DATA } from "../data";
 import { useI18n } from "../i18n";
+import { IconScanFrame } from "./CareSymbols";
 
 // ---------------------------------------------------------------------------
 // Local-only user conveniences (favorites + reminders) live in localStorage;
@@ -85,7 +86,12 @@ function relativeDue(dueAt: number, now: number): string {
   return `In ${days} day${days === 1 ? "" : "s"}`;
 }
 
-export default function HistoryPage() {
+type HistoryPageProps = {
+  /** Navigate to the scan page — same callback pattern as HomePage's onPrimaryCta. */
+  onScan: () => void;
+};
+
+export default function HistoryPage({ onScan }: HistoryPageProps) {
   const { t } = useI18n();
   const [items, setItems] = useState<Prediction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -271,7 +277,13 @@ export default function HistoryPage() {
       {loading ? (
         <p className="admin-panel-loading" role="status">{t("common.loading")}</p>
       ) : visible.length === 0 ? (
-        <p className="admin-empty">{items.length ? "No scans match this search or filter." : t("history.empty")}</p>
+        <div className="history-empty">
+          <div className="history-empty-icon"><IconScanFrame size={30} /></div>
+          <p>{items.length ? "No scans match this search or filter." : t("history.empty")}</p>
+          <button type="button" className="btn btn-primary" onClick={onScan}>
+            Scan your first garment
+          </button>
+        </div>
       ) : (
         <>
           <div className="history-toolbar">
@@ -398,7 +410,7 @@ export default function HistoryPage() {
             <div className="history-planner-panel" role="region" aria-label="Wash load plan">
               <h4>{t("history.loadTitle")}</h4>
               {plan.machineCount === 0 ? (
-                <p className="admin-empty">{t("history.loadEmpty")}</p>
+                <p className="history-empty-note">{t("history.loadEmpty")}</p>
               ) : (
                 <>
                   <div className="load-plan-grid">

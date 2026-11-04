@@ -1,7 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { MotionButton, MotionPage, Reveal, TextEffect } from "../motion-primitives";
 import { useI18n } from "../i18n";
 import { FABRICS_DATA } from "../data";
+import {
+  IconAssistant,
+  IconBasket,
+  IconCamera,
+  IconChat,
+  IconDosing,
+  IconFlask,
+  IconGlobe,
+  IconProfile,
+  IconRefresh,
+  IconShield,
+  IconSparkle,
+  IconTexture,
+  IconVault,
+  IconWeave,
+  type IconProps,
+} from "./CareSymbols";
 
 type HomePageProps = {
   /** Public visitors land here before signing in; signed-in users get the full CTA. */
@@ -20,33 +37,40 @@ const DEMO_SCAN = [
 ];
 
 /**
- * Evaluation numbers declared in the published training artifact.
- * They are shown as-is and labeled, never extrapolated.
+ * Evaluation numbers declared in the shipped model's manifest
+ * (fabric_mobilenetv2.manifest.json: test_accuracy 0.8303, macro_f1 0.8278,
+ * test_images 277 — five leaked non-fabric copies excluded from the 282-image
+ * held-out split). They are shown as-is and labeled, never extrapolated.
+ * Corrected 2026-11-03 (audit P0-4): the band previously cited an older
+ * artifact's 79.4% / 282 / 0.80 figures.
  */
 const LANDING_STATS: { value: number; decimals: number; suffix: string; label: string }[] = [
   { value: 6, decimals: 0, suffix: "", label: "Fabric classes (+ non-fabric rejection)" },
   { value: 3940, decimals: 0, suffix: "", label: "Curated training images" },
-  { value: 282, decimals: 0, suffix: "", label: "Held-out test images" },
-  { value: 79.4, decimals: 1, suffix: "%", label: "Test accuracy (artifact-declared)" },
-  { value: 0.8, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
+  { value: 277, decimals: 0, suffix: "", label: "Held-out test images" },
+  { value: 83.03, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
+  { value: 0.83, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
   { value: 4, decimals: 0, suffix: "", label: "UI languages · °C/°F anywhere" },
 ];
 
-const FEATURE_WALL: { icon: string; title: string; desc: string; tag?: string }[] = [
-  { icon: "📷", title: "AI Fabric Scan", desc: "Camera or upload. Resolution and lighting pre-checks, confidence score, full probability distribution." },
-  { icon: "🧾", title: "Full Care Profiles", desc: "Wash, dry, iron, detergent and bleach guidance — with the textile science behind every rule." },
-  { icon: "🧪", title: "Stain Treatment Guide", desc: "Six stain types across five fabrics with step-by-step treatment protocols and safety notes." },
-  { icon: "⚗️", title: "Smart Dosing Calculator", desc: "Detergent dose tuned to fabric, load size and soil level — never over-dose again." },
-  { icon: "🗂️", title: "My Scans Vault", desc: "Scan history with notes, favorites, CSV export and wash reminders.", tag: "Sign in" },
-  { icon: "🫧", title: "Wash-Load Planner", desc: "Mix compatible garments into one wash — the strictest conditions always win." },
-  { icon: "🤖", title: "Care Assistant", desc: "Bring your own OpenAI key and ask anything about a fabric. Runs entirely in your browser.", tag: "Sign in" },
-  { icon: "🔄", title: "Human-Reviewed Active Learning", desc: "Every correction is queued, reviewed by a human, then added to the next training set.", tag: "Admin" },
-  { icon: "🛡️", title: "Transparent Model Card", desc: "Metrics, full confusion matrix, confidence thresholds and version history — open book." },
-  { icon: "🌍", title: "EN · ES · DE · FR + °C/°F", desc: "Localize the whole experience. Temperature units follow you everywhere." },
+const FEATURE_WALL: { icon: ComponentType<IconProps>; title: string; desc: string; tag?: string }[] = [
+  { icon: IconCamera, title: "AI Fabric Scan", desc: "Camera or upload. Resolution and lighting pre-checks, confidence score, full probability distribution." },
+  { icon: IconProfile, title: "Full Care Profiles", desc: "Wash, dry, iron, detergent and bleach guidance — with the textile science behind every rule." },
+  { icon: IconFlask, title: "Stain Treatment Guide", desc: "Six stain types across five fabrics with step-by-step treatment protocols and safety notes." },
+  { icon: IconDosing, title: "Smart Dosing Calculator", desc: "Detergent dose tuned to fabric, load size and soil level — never over-dose again." },
+  { icon: IconVault, title: "My Scans Vault", desc: "Scan history with notes, favorites, CSV export and wash reminders.", tag: "Sign in" },
+  { icon: IconBasket, title: "Wash-Load Planner", desc: "Mix compatible garments into one wash — the strictest conditions always win." },
+  { icon: IconAssistant, title: "Care Assistant", desc: "Bring your own OpenAI key and ask anything about a fabric. Runs entirely in your browser.", tag: "Sign in" },
+  { icon: IconRefresh, title: "Human-Reviewed Active Learning", desc: "Every correction is queued, reviewed by a human, then added to the next training set.", tag: "Admin" },
+  { icon: IconShield, title: "Transparent Model Card", desc: "Metrics, full confusion matrix, confidence thresholds and version history — open book." },
+  { icon: IconGlobe, title: "EN · ES · DE · FR + °C/°F", desc: "Localize the whole experience. Temperature units follow you everywhere." },
 ];
 
 function CountUp({ target, decimals, suffix, started }: { target: number; decimals: number; suffix: string; started: boolean }) {
-  const [value, setValue] = useState(0);
+  // Default render is the true final value; the count-up is only a
+  // progressive enhancement once the band is actually seen (audit P0-4) —
+  // the band must never sit at 0 / 0.0% when the observer doesn't fire.
+  const [value, setValue] = useState(target);
   useEffect(() => {
     if (!started) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -124,12 +148,10 @@ export default function HomePage({ isPublic, onPrimaryCta, onLibrary }: HomePage
                   {t("hero.secondary")}
                 </button>
               </div>
-              <div className="trust-badge">
-                <span>🛡️ Computer vision assisted</span>
-                <span>•</span>
-                <span>Evidence-led</span>
-                <span>•</span>
-                <span>Care labels authoritative</span>
+              <div className="trust-badge trust-badge-group">
+                <span className="trust-pill"><IconShield size={13} /> Computer vision assisted</span>
+                <span className="trust-pill">Evidence-led</span>
+                <span className="trust-pill">Care labels authoritative</span>
               </div>
             </Reveal>
 
@@ -200,27 +222,27 @@ export default function HomePage({ isPublic, onPrimaryCta, onLibrary }: HomePage
             </div>
             <div className="engine-grid">
               <div className="engine-card">
-                <div className="engine-icon">🔍</div>
+                <div className="engine-icon"><IconTexture size={26} /></div>
                 <h4>Texture</h4>
                 <p>Identifies micro-surface relief, fiber fuzziness, and roughness metrics.</p>
               </div>
               <div className="engine-card">
-                <div className="engine-icon">📐</div>
+                <div className="engine-icon"><IconWeave size={26} /></div>
                 <h4>Weave Pattern</h4>
                 <p>Examines plain, twill, satin, or looped knit structural patterns.</p>
               </div>
               <div className="engine-card">
-                <div className="engine-icon">✨</div>
+                <div className="engine-icon"><IconSparkle size={26} /></div>
                 <h4>Optical Luster</h4>
                 <p>Distinguishes natural matte cottons from high-luster synthetics and silks.</p>
               </div>
               <div className="engine-card">
-                <div className="engine-icon">💬</div>
+                <div className="engine-icon"><IconChat size={26} /></div>
                 <h4>Context Notes</h4>
                 <p>Combines visual cues with optional user-supplied garment details.</p>
               </div>
               <div className="engine-card">
-                <div className="engine-icon">🛡️</div>
+                <div className="engine-icon"><IconShield size={26} /></div>
                 <h4>Confidence Gate</h4>
                 <p>Rejects low-certainty and non-fabric images to prevent false care guidance.</p>
               </div>
@@ -292,7 +314,7 @@ export default function HomePage({ isPublic, onPrimaryCta, onLibrary }: HomePage
               ))}
             </div>
             <p className="landing-numbers-note">
-              Figures declared in the published training artifact (3,940 train / 282 held-out test images). The full confusion matrix, per-class precision and recall live on the Model &amp; Research page.
+              Figures declared in the shipped model&apos;s published manifest (3,940 train / 277 held-out test images). The full confusion matrix, per-class precision and recall live on the Model &amp; Research page.
             </p>
           </section>
 
@@ -306,7 +328,7 @@ export default function HomePage({ isPublic, onPrimaryCta, onLibrary }: HomePage
             <div className="feature-wall-grid">
               {FEATURE_WALL.map((feature) => (
                 <div className="feature-card" key={feature.title}>
-                  <div className="feature-icon">{feature.icon}</div>
+                  <div className="feature-icon"><feature.icon size={26} /></div>
                   <h4>{feature.title}</h4>
                   <p>{feature.desc}</p>
                   {feature.tag ? <span className="feature-tag">{feature.tag}</span> : null}

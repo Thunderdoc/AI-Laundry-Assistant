@@ -703,6 +703,21 @@ class TestFirebaseTokenVerification(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
 
 
+class TestTokenSigningDependencies(unittest.TestCase):
+    """Regression guard for the silent-skip hole (audit 2026-11-03).
+
+    TestFirebaseTokenVerification skips itself when PyJWT or cryptography is
+    missing, and neither package was declared in backend/requirements.txt —
+    a requirements-only environment ran the suite "green" while none of the
+    seven Firebase token-verification tests executed. This test never skips:
+    if the dependencies disappear again, the gate goes red instead of quiet.
+    """
+
+    def test_token_signing_dependencies_are_installed(self):
+        import jwt  # noqa: F401  (PyJWT — signs the RS256 test tokens)
+        from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: F401
+
+
 class TestFrontendStaticContainment(unittest.TestCase):
     """Regression tests for the 2026-10-24 audit P0 (SPA path traversal).
 
@@ -962,6 +977,143 @@ class TestStorageFailover(unittest.TestCase):
                 with patch.dict(os.environ, {}):
                     os.environ.pop("MODEL_PATH", None)
                     self.assertEqual(app_main.resolve_model_path(), bundled)
+
+
+class TestAudit2026Fixes(unittest.TestCase):
+    """Regression tests for the 2026-11-03 audit fixes (M-1..M-4, L-1).
+
+    Each test pins one finding: it fails on the pre-fix code and passes
+    after. Behavioural evidence that cannot live in a unit suite (the M-4
+    burst timings) is recorded in AUDIT-FIXES-2026-11-03.md.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+
+    # --- M-1: the CORS regex must trust only this project's own hostnames.
+    # Pre-fix, allow_origin_regex matched EVERY *.vercel.app and *.e2b.app
+    # origin with credentials (audit evidence: anything-at-all.vercel.app
+    # and random.e2b.app were both reflected).
+
+    def _acao(self, origin):
+        res = self.client.get("/api/fabrics", headers={"Origin": origin})
+        self.assertEqual(res.status_code, 200)
+        return res.headers.get("access-control-allow-origin")
+
+    def test_cors_reflects_own_production_origin(self):
+        origin = "https://ai-laundry-assistant-psi.vercel.app"
+        self.assertEqual(self._acao(origin), origin)
+
+    def test_cors_reflects_own_preview_origin(self):
+        origin = "https://ai-laundry-assistant-git-audit-fix-thunderdoc.vercel.app"
+        self.assertEqual(self._acao(origin), origin)
+
+    def test_cors_rejects_stranger_vercel_origin(self):
+        self.assertIsNone(self._acao("https://anything-at-all.vercel.app"))
+
+    def test_cors_rejects_e2b_origin(self):
+        self.assertIsNone(self._acao("https://random.e2b.app"))
+
+    def test_cors_rejects_unrelated_origin(self):
+        self.assertIsNone(self._acao("https://evil.example.com"))
+
+    # --- M-2: /api/health must surface the auth state. Pre-fix the payload
+    # had no auth field at all, so a silent no-auth degradation (Firebase
+    # config incomplete -> middleware off, identity from a client header)
+    # was invisible to monitors.
+
+    def test_health_reports_auth_disabled_without_firebase_config(self):
+        # The suite imports the app with no Firebase configuration.
+        data = self.client.get("/api/health").json()
+        self.assertEqual(data.get("auth"), "disabled")
+
+    def test_health_reports_auth_enabled_with_firebase_config(self):
+        full = {"apiKey": "test-key", "authDomain": "test.firebaseapp.com",
+                "projectId": "test-project", "appId": "1:0:web:test"}
+        with patch.dict(app_main.FIREBASE_CONFIG, full):
+            data = self.client.get("/api/health").json()
+        self.assertEqual(data.get("auth"), "enabled")
+
+    # --- M-3: EXIF orientation must be applied in the predict decode path.
+    # Pre-fix, a phone photo (pixels stored rotated, EXIF orientation 6)
+    # was scored sideways: the audit measured a real cotton photo dropping
+    # from 99.96 upright to 84.13 as stored.
+
+    def _exif_phone_bytes(self):
+        """A 300x200 photo (left red / right blue) as a phone stores it:
+        pixel matrix rotated 90 CCW (200x300) + EXIF orientation 6."""
+        upright = Image.new("RGB", (300, 200), (200, 30, 30))
+        upright.paste((30, 30, 200), (150, 0, 300, 200))
+        stored = upright.transpose(Image.ROTATE_90)
+        exif = Image.Exif()
+        exif[274] = 6
+        buf = io.BytesIO()
+        stored.save(buf, format="JPEG", quality=95, exif=exif.tobytes())
+        return buf.getvalue()
+
+    def test_predict_applies_exif_orientation(self):
+        res = self.client.post("/api/predict", files={"image": ("phone.jpg", self._exif_phone_bytes(), "image/jpeg")})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        # The decoded image must carry the DISPLAYED dimensions (300x200),
+        # not the stored pixel-matrix dimensions (200x300).
+        self.assertEqual(data["quality"]["width"], 300)
+        self.assertEqual(data["quality"]["height"], 200)
+        # The stored upload is the same decoded image: also upright.
+        stored_path = os.path.join(app_main.UPLOADS_DIR, data["image_token"])
+        with Image.open(stored_path) as saved:
+            self.assertEqual(saved.size, (300, 200))
+
+    def test_predict_exif_photo_scores_like_upright(self):
+        # Consistency guard on a real held-out photo: the EXIF-stored copy
+        # must produce the same top fabric at near-identical confidence.
+        data_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "test", "cotton")
+        path = os.path.join(data_dir, sorted(os.listdir(data_dir))[0])
+        with open(path, "rb") as f:
+            raw = f.read()
+        up = self.client.post("/api/predict", files={"image": ("upright.jpg", raw, "image/jpeg")})
+        self.assertEqual(up.status_code, 200)
+        src = Image.open(io.BytesIO(raw)).convert("RGB")
+        stored = src.transpose(Image.ROTATE_90)
+        exif = Image.Exif()
+        exif[274] = 6
+        buf = io.BytesIO()
+        stored.save(buf, format="JPEG", quality=95, exif=exif.tobytes())
+        ro = self.client.post("/api/predict", files={"image": ("phone.jpg", buf.getvalue(), "image/jpeg")})
+        self.assertEqual(ro.status_code, 200)
+        u, r = up.json()["model_decision"], ro.json()["model_decision"]
+        self.assertEqual(u["top_fabric"], r["top_fabric"])
+        self.assertAlmostEqual(u["top_confidence"], r["top_confidence"], delta=5.0)
+
+    # --- M-4: predict's blocking work (decode, inference, persistence)
+    # must not run on the event loop. The handler stays async only to read
+    # the upload; everything after runs via run_in_threadpool. Behavioural
+    # proof (burst timings) lives in AUDIT-FIXES-2026-11-03.md.
+
+    def test_predict_offloads_blocking_work_to_threadpool(self):
+        import inspect
+        self.assertTrue(inspect.iscoroutinefunction(app_main.predict))
+        self.assertIn("run_in_threadpool", inspect.getsource(app_main.predict))
+        self.assertTrue(callable(app_main._predict_from_bytes))
+
+    # --- L-1: unmatched /api/* paths must return a JSON 404, not the SPA.
+    # Pre-fix they fell through to the catch-all and returned 200 text/html.
+
+    def test_unknown_api_path_returns_json_404(self):
+        res = self.client.get("/api/does-not-exist")
+        self.assertEqual(res.status_code, 404)
+        self.assertIn("application/json", res.headers.get("content-type", ""))
+        self.assertEqual(res.json(), {"detail": "Not Found"})
+
+    def test_unknown_spa_path_still_serves_index_html(self):
+        res = self.client.get("/some-spa-route")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("text/html", res.headers.get("content-type", ""))
 
 
 if __name__ == "__main__":

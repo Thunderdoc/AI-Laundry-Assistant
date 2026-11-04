@@ -1,4 +1,4 @@
-import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, lazy, Suspense, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { useReducedMotion } from "motion/react";
 import { createRoot } from "react-dom/client";
 import { getApp, getApps, initializeApp } from "firebase/app";
@@ -31,15 +31,56 @@ import {
 } from "./lib";
 import { PRESET_TAGS, STAIN_GUIDE } from "./data";
 import { LANGS, LangProvider, useI18n } from "./i18n";
-import AdminConsole from "./components/AdminConsole";
 import HomePage from "./components/HomePage";
 import LibraryPage from "./components/LibraryPage";
 import SiteFooter from "./components/SiteFooter";
 import PublicLanding from "./components/PublicLanding";
 import CareAssistant from "./components/CareAssistant";
-import CareSymbols from "./components/CareSymbols";
+import CareSymbols, {
+  IconAtom,
+  IconBleach,
+  IconBolt,
+  IconBulb,
+  IconChip,
+  IconDatabase,
+  IconDetergent,
+  IconDosing,
+  IconDry,
+  IconFeather,
+  IconFlask,
+  IconIron,
+  IconKettlebell,
+  IconLayers,
+  IconLeaf,
+  IconShare,
+  IconShirt,
+  IconSpeaker,
+  IconSparkle,
+  IconStop,
+  IconThermo,
+  IconWash,
+} from "./components/CareSymbols";
+import { buildShareCareText, buildSpokenCareText, type CareSummaryInput, type CareTextLabels } from "./careText";
 import HistoryPage from "./components/HistoryPage";
 import "./style.css";
+
+// Code-split (audit L-5 / P1, 2026-11-03): the admin console and the Load
+// Builder are sign-in-only surfaces most visitors never open — lazy-load
+// them so the initial chunk stays lean. Both keep their default exports.
+const AdminConsole = lazy(() => import("./components/AdminConsole"));
+const LoadBuilderPage = lazy(() => import("./components/LoadBuilderPage"));
+
+// Bundled sample photos (extra features, 2026-11-04): one per class, drawn
+// from the project's own held-out test split (data/test) and verified
+// through the real predict path before bundling — see EXTRA-FEATURES.md for
+// the measured prediction of each file. Clicking one runs the exact same
+// analyze() flow as an uploaded photo.
+const SAMPLE_PHOTOS = [
+  { id: "cotton", src: "/samples/sample-cotton.jpg", label: "Cotton" },
+  { id: "denim", src: "/samples/sample-denim.jpg", label: "Denim" },
+  { id: "silk", src: "/samples/sample-silk.jpg", label: "Silk" },
+  { id: "wool", src: "/samples/sample-wool.jpg", label: "Wool" },
+] as const;
 
 const firebaseWebConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -369,7 +410,7 @@ function AuthGate() {
               <label>Email<input type="email" autoComplete="email" required disabled={!settings.enabled} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
               <label>Password<input type="password" autoComplete={isRegistering ? "new-password" : "current-password"} minLength={6} required disabled={!settings.enabled} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" /></label>
               {!isRegistering && <button className="forgot-password" type="button" onClick={handlePasswordReset} disabled={!settings.enabled || isSigningIn}>{t("login.forgot")}</button>}
-              <button className="email-login-submit" disabled={!settings.enabled || isSigningIn}>{isSigningIn ? "…" : isRegistering ? t("login.register") : t("login.login")}</button>
+              <button className="email-login-submit" disabled={!settings.enabled || isSigningIn}>{isSigningIn ? <><span className="btn-spinner" aria-hidden="true" />…</> : isRegistering ? t("login.register") : t("login.login")}</button>
             </form>
             {settings.enabled ? <>
               <button className="auth-switch" type="button" onClick={() => setIsRegistering((value) => !value)}>{isRegistering ? t("login.have") : t("login.new")}</button>
@@ -380,7 +421,7 @@ function AuthGate() {
               </MotionButton>
             </> : <>
               <div className="auth-setup"><strong>Firebase setup pending</strong><br />Email, password and Google sign-in will activate after deployment.</div>
-              <button className="email-login-submit guest-entry" type="button" onClick={continueAsGuest}>CONTINUE AS GUEST <span>→</span></button>
+              <button className="guest-entry" type="button" onClick={continueAsGuest}>CONTINUE AS GUEST <span>→</span></button>
             </>}
           </>
         )}
@@ -404,7 +445,7 @@ function AuthGate() {
   return <PublicLanding onSignIn={() => setAuthMode("login")} />;
 }
 
-type Page = "home" | "analyze" | "insights" | "library" | "history" | "assistant" | "admin" | "about";
+type Page = "home" | "analyze" | "insights" | "library" | "history" | "loads" | "assistant" | "admin" | "about";
 
 function ConfusionMatrixView({ metrics }: { metrics: any }) {
   if (!metrics?.confusion_matrix || !metrics?.per_class_metrics) {
@@ -528,6 +569,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [status, setStatus] = useState("");
   const [isErrorStatus, setIsErrorStatus] = useState(false);
   const [analysisStep, setAnalysisStep] = useState<number>(0);
+  const [analysisElapsed, setAnalysisElapsed] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<Prediction | undefined>();
   const [history, setHistory] = useState<Prediction[]>([]);
@@ -553,6 +595,19 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   const [stainTab, setStainTab] = useState<string>("coffee");
   const [loadWeight, setLoadWeight] = useState<"small" | "medium" | "large">("medium");
   const [soilLevel, setSoilLevel] = useState<"light" | "normal" | "heavy">("normal");
+
+  // Extra features (2026-11-04): voice readout, shareable care card, samples.
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [sampleLoading, setSampleLoading] = useState<string | null>(null);
+  const speechSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+
+  const stopSpeech = () => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+  };
   
   const input = useRef<HTMLInputElement>(null);
   const video = useRef<HTMLVideoElement>(null);
@@ -619,6 +674,38 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Voice readout must never outlive the result it describes: changing page
+  // stops it (starting a new scan also stops it — see onFileChange/analyze),
+  // and unmounting cancels any in-flight utterance.
+  useEffect(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+  }, [page]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  // Truthful long-wait state: whole seconds since the current scan began,
+  // so a cold-start wait can say how long it has actually been (audit P0-1).
+  useEffect(() => {
+    if (!isAnalyzing) {
+      setAnalysisElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = window.setInterval(() => {
+      setAnalysisElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [isAnalyzing]);
 
   // Global Keyboard Shortcuts (Ctrl+Enter to Analyze, Esc to cancel camera)
   useEffect(() => {
@@ -698,6 +785,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
   };
 
   const onFileChange = (incoming?: File) => {
+    stopSpeech();
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
     }
@@ -755,8 +843,13 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
     }
   };
 
-  const analyze = async () => {
-    if (!file || isAnalyzing) {
+  // `overrideFile` exists for the sample picker: it hands over the exact
+  // File it fetched so the run does not depend on state having flushed.
+  // Every step after that is the one shared path — downscale, health probe,
+  // /predict — identical for uploads, camera captures and samples.
+  const analyze = async (overrideFile?: File) => {
+    const targetFile = overrideFile ?? file;
+    if (!targetFile || isAnalyzing) {
       return;
     }
 
@@ -768,34 +861,29 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       return;
     }
 
+    stopSpeech();
     setIsAnalyzing(true);
     setIsErrorStatus(false);
     setFeedbackSubmitted(false);
     setFeedbackMessage("");
     setIsSelectingCorrection(false);
-    
-    // Multi-stage animated processing sequence
-    const steps = [
-      "1/4 Preparing image & normalizing tensors...",
-      "2/4 Extracting visual surface & weave features...",
-      "3/4 Running MobileNetV2 fabric classification...",
-      "4/4 Evaluating confidence gates & generating care rules..."
-    ];
 
-    for (let i = 0; i < steps.length; i++) {
-      setAnalysisStep(i + 1);
-      setStatus(steps[i]);
-      await new Promise((resolve) => setTimeout(resolve, 320));
-    }
-
+    // Honest phases (audit P0-1): each step is set only when that stage of
+    // the real request lifecycle actually begins — no staged pre-upload
+    // animation, no added delay. 1 = preparing the photo (downscale),
+    // 2 = connecting / waking the service (health probe), 3 = the predict
+    // request in flight, 5 = complete (set on success below).
+    setAnalysisStep(1);
+    setStatus("Preparing your photo…");
     const form = new FormData();
-    form.append("image", await downscaleImage(file));
+    form.append("image", await downscaleImage(targetFile));
     const trimmedNote = note.trim();
     if (trimmedNote) {
       form.append("note", trimmedNote);
     }
 
     try {
+      setAnalysisStep(2);
       setStatus("Connecting to the AI service…");
       let health = await withTimeout(fetch(`${API}/health?probe=false`), 4_000, "health check").catch(() => null);
       if (!health?.ok) {
@@ -803,6 +891,8 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         await new Promise((resolve) => setTimeout(resolve, 2500));
         health = await withTimeout(fetch(`${API}/health?probe=false`), 4_000, "health check").catch(() => null);
       }
+      setAnalysisStep(3);
+      setStatus("Analysing fabric — reading texture & weave…");
       // Audit P1-10: cold starts can exceed even a generous timeout once, so
       // retry once on a timeout only. Other errors surface immediately, so a
       // completed-but-unacknowledged scan is never duplicated in history.
@@ -847,6 +937,106 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
       setAnalysisStep(0);
     } finally {
       setIsAnalyzing(false);
+    }
+  };
+
+  // ── Extra features (2026-11-04): voice readout, share card, samples ──────
+
+  const careLabels = (): CareTextLabels => ({
+    title: t("result.shareTitle"),
+    fabric: t("care.fabric"),
+    confidence: t("care.confidence"),
+    percent: t("care.percent"),
+    uncertain: t("care.uncertain"),
+    uncertainShort: t("care.uncertainShort"),
+    wash: t("care.wash"),
+    dry: t("care.dry"),
+    iron: t("care.iron"),
+    detergent: t("care.detergent"),
+    bleach: t("care.bleach"),
+    warning: t("care.warning"),
+  });
+
+  // Map a Prediction onto the text builders' input, mirroring the result
+  // view: the top warning is the blur retake hint (same fallback copy the
+  // banner shows) and the detergent falls back exactly like the care card.
+  const careSummaryInput = (pred: Prediction): CareSummaryInput => {
+    const rec = pred.recommendation;
+    return {
+      fabric: pred.fabric,
+      accepted: Boolean(pred.model_decision?.accepted),
+      confidence: pred.confidence,
+      washTemperature: rec ? convertTempText(rec.wash.temperature, tempUnit) : null,
+      washCycle: rec?.wash.cycle ?? null,
+      dry: rec?.dry ?? null,
+      iron: rec?.iron ?? null,
+      detergent: rec ? rec.wash.detergent || "Mild formula" : null,
+      bleach: rec?.bleach ?? null,
+      warning: pred.quality?.blurry
+        ? pred.quality.blur_warning || "Photo looks blurry — retake with a steady hand for a more reliable result."
+        : null,
+    };
+  };
+
+  const toggleListen = () => {
+    if (!result || !speechSupported) return;
+    if (isSpeaking) {
+      stopSpeech();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(
+      buildSpokenCareText(careSummaryInput(result), careLabels())
+    );
+    utterance.lang = lang;
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+    setIsSpeaking(true);
+  };
+
+  const shareResult = async () => {
+    if (!result) return;
+    const text = buildShareCareText(careSummaryInput(result), careLabels());
+    if (typeof navigator !== "undefined" && "share" in navigator) {
+      try {
+        await navigator.share({ title: t("result.shareTitle"), text });
+        return;
+      } catch (error) {
+        // The user dismissing the share sheet is not an error — and must
+        // not fall through to a silent clipboard copy.
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2000);
+    } catch {
+      // Clipboard unavailable (permissions / insecure context): no fake success.
+    }
+  };
+
+  // Fetch a bundled sample and run it through the exact same path as an
+  // uploaded photo: onFileChange (preview, quality check, state reset),
+  // then analyze() with that File (downscale → health probe → /predict).
+  const runSample = async (sample: (typeof SAMPLE_PHOTOS)[number]) => {
+    if (isAnalyzing || sampleLoading) return;
+    setSampleLoading(sample.id);
+    try {
+      const response = await fetch(sample.src);
+      if (!response.ok) throw new Error(`sample fetch ${response.status}`);
+      const blob = await response.blob();
+      const sampleFile = new File([blob], `sample-${sample.id}.jpg`, {
+        type: blob.type || "image/jpeg",
+      });
+      onFileChange(sampleFile);
+      await analyze(sampleFile);
+    } catch {
+      setStatus("Could not load the sample photo. Please try uploading your own photo instead.");
+      setIsErrorStatus(true);
+    } finally {
+      setSampleLoading(null);
     }
   };
 
@@ -981,6 +1171,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
           {nav("insights", t("nav.model"))}
           {nav("library", t("nav.library"))}
           {nav("history", t("nav.history"))}
+          {nav("loads", t("nav.loads"))}
           {nav("assistant", t("nav.assistant"))}
           {user.is_admin && nav("admin", t("nav.admin"))}
         </nav>
@@ -1161,6 +1352,31 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                 onChange={(e) => onFileChange(e.target.files?.[0])}
               />
 
+              {/* Sample picker (extra features, 2026-11-04): bundled photos
+                  from the project's own test split, each verified through
+                  the real predict path before bundling. Clicking one runs
+                  the same analyze() flow as an upload — no parallel code. */}
+              {!stream && (
+                <div className="sample-picker">
+                  <span className="sample-picker-label">{t("analyze.samples")}</span>
+                  <div className="sample-thumbs">
+                    {SAMPLE_PHOTOS.map((sample) => (
+                      <button
+                        key={sample.id}
+                        type="button"
+                        className="sample-thumb"
+                        disabled={isAnalyzing || sampleLoading !== null}
+                        onClick={() => void runSample(sample)}
+                        aria-label={`${t("analyze.samples")}: ${sample.label}`}
+                      >
+                        <img src={sample.src} alt="" loading="lazy" />
+                        <span>{sampleLoading === sample.id ? t("common.loading") : sample.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Client-side Pre-flight Quality Assessment */}
               {imageAssessment && (
                 <div className="quality-assessment-box">
@@ -1280,32 +1496,43 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   className="btn btn-primary"
                   style={{ flex: 1, minWidth: "160px" }}
                   disabled={!file || isAnalyzing || !!noteError}
-                  onClick={analyze}
+                  onClick={() => void analyze()}
                 >
                   {isAnalyzing ? t("analyze.analyzing") : `✨ ${t("analyze.run")}`}
                 </button>
               </div>
 
-              {/* Multi-step Processing Animation */}
+              {/* Honest processing state (audit P0-1): the steps below mirror
+                  the real request lifecycle — preparing the photo, connecting
+                  or waking the service, then the analysis request itself. */}
               {isAnalyzing && (
                 <MotionDiv className="processing-screen" initial={reduceMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .25, ease: "easeOut" }}>
-                  <div className="processing-spinner"></div>
-                  <h3 style={{ fontSize: "20px", marginBottom: "8px" }}>AI Vision Engine at Work</h3>
-                  <p style={{ color: "var(--text-muted)", fontSize: "14px" }}>{status}</p>
+                  {previewUrl ? (
+                    <div className="processing-photo">
+                      <img src={previewUrl} alt="Garment being analysed" />
+                      <div className="laser-scan-line" aria-hidden="true"></div>
+                    </div>
+                  ) : (
+                    <div className="processing-spinner"></div>
+                  )}
+                  <h3 className="processing-title">AI Vision Engine at Work</h3>
+                  <p className="processing-status">{status}</p>
                   <div className="processing-steps">
                     <div className={`p-step ${analysisStep >= 1 ? (analysisStep > 1 ? "done" : "active") : ""}`}>
-                      <span>{analysisStep > 1 ? "✓" : "◉"}</span> Image tensor preprocessing (224×224 Normalization)
+                      <span>{analysisStep > 1 ? "✓" : "◉"}</span> Preparing your photo
                     </div>
                     <div className={`p-step ${analysisStep >= 2 ? (analysisStep > 2 ? "done" : "active") : ""}`}>
-                      <span>{analysisStep > 2 ? "✓" : "◉"}</span> Convolutional feature extraction (texture & weave)
+                      <span>{analysisStep > 2 ? "✓" : "◉"}</span> Connecting to the AI service
                     </div>
                     <div className={`p-step ${analysisStep >= 3 ? (analysisStep > 3 ? "done" : "active") : ""}`}>
-                      <span>{analysisStep > 3 ? "✓" : "◉"}</span> MobileNetV2 neural classification
-                    </div>
-                    <div className={`p-step ${analysisStep >= 4 ? (analysisStep > 4 ? "done" : "active") : ""}`}>
-                      <span>{analysisStep > 4 ? "✓" : "◉"}</span> Confidence gating & knowledge base care mapping
+                      <span>{analysisStep > 3 ? "✓" : "◉"}</span> Analysing texture &amp; weave
                     </div>
                   </div>
+                  {analysisElapsed >= 8 && (
+                    <p className="processing-elapsed">
+                      Still working — {analysisElapsed}s so far. After a quiet period the AI service needs a little time to wake up; your care profile is on its way.
+                    </p>
+                  )}
                 </MotionDiv>
               )}
 
@@ -1326,33 +1553,27 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                     <div>
                       <div className="fabric-title-large">{result.fabric}</div>
                       {result.note && (
-                        <p className="context-note" style={{ marginTop: "8px" }}>
+                        <p className="context-note">
                           <b>Garment Context:</b> {result.note}
                         </p>
                       )}
                     </div>
-                    <div style={{ textAlign: "right" }}>
+                    <div className="result-confidence">
                       {result.model_decision?.accepted ? (
                         <>
-                          <div
-                            style={{
-                              fontSize: "24px",
-                              fontWeight: 800,
-                              color: result.confidence >= 70 ? "var(--primary)" : "var(--warning)"
-                            }}
-                          >
+                          <div className={`confidence-value ${result.confidence >= 70 ? "" : "is-low"}`}>
                             {result.confidence}%
                           </div>
-                          <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-light)", textTransform: "uppercase" }}>
+                          <span className="confidence-caption">
                             {result.confidence >= 80 ? "High Confidence" : result.confidence >= 60 ? "Moderate Certainty" : "Low Confidence"}
                           </span>
                         </>
                       ) : (
                         <>
-                          <div style={{ fontSize: "24px", fontWeight: 800, color: "var(--warning)" }}>
+                          <div className="confidence-value is-low">
                             Uncertain
                           </div>
-                          <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-light)", textTransform: "uppercase" }}>
+                          <span className="confidence-caption">
                             No confident match
                           </span>
                         </>
@@ -1371,11 +1592,39 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   </div>
                   )}
 
+                  {/* Result tools (extra features, 2026-11-04): voice readout
+                      + shareable care card. Both compose under the same
+                      display rules as this card — a rejected result never
+                      gets its confidence read out or shared. */}
+                  <div className="result-tools">
+                    {speechSupported && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary result-tool-btn"
+                        onClick={toggleListen}
+                        aria-pressed={isSpeaking}
+                      >
+                        {isSpeaking ? (
+                          <><IconStop size={16} /> {t("result.stop")}</>
+                        ) : (
+                          <><IconSpeaker size={16} /> {t("result.listen")}</>
+                        )}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-secondary result-tool-btn"
+                      onClick={() => void shareResult()}
+                    >
+                      <IconShare size={16} /> {shareCopied ? `✓ ${t("result.copied")}` : t("result.share")}
+                    </button>
+                  </div>
+
                   {/* Server-measured photo sharpness: blurry photos are the
                       model's weakest input (62.8% on blurred test photos), so
                       a blurry result gets a retake hint instead of silent doubt. */}
                   {result.quality?.blurry && (
-                    <div className="blur-warning" style={{ marginTop: "12px", padding: "10px 12px", borderRadius: "10px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", fontSize: "13px", fontWeight: 600, color: "var(--warning)" }}>
+                    <div className="blur-warning result-banner">
                       📷 {result.quality.blur_warning || "Photo looks blurry — retake with a steady hand for a more reliable result."}
                     </div>
                   )}
@@ -1383,7 +1632,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                   {/* Audit P1-1: never let a device-only save look like a cloud
                       save — this scan lives on this browser only. */}
                   {result.saved_local_only && (
-                    <div style={{ marginTop: "12px", padding: "10px 12px", borderRadius: "10px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", fontSize: "13px", fontWeight: 600, color: "var(--warning)" }}>
+                    <div className="result-banner">
                       💾 Saved on this device only — cloud history is unavailable, so this scan will not sync.
                     </div>
                   )}
@@ -1402,111 +1651,6 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                     </div>
                   )}
 
-                  {/* ========================================================
-                      HUMAN-IN-THE-LOOP ACTIVE LEARNING FEEDBACK BOX
-                      ======================================================== */}
-                  <div className="feedback-box">
-                    <div className="feedback-title">
-                      <span>🎯 Active Learning Feedback & Continuous Dataset Training</span>
-                    </div>
-                    <p className="feedback-desc">
-                      Help LaundryAI learn. Your correction enters a private review queue; an administrator checks the label before it can become training data.
-                    </p>
-
-                    {result.feedback_available === false || result.id == null ? (
-                      <p style={{ fontSize: "13.5px", color: "var(--text-light)" }}>
-                        Feedback is unavailable for this scan because it could not be saved. Rescan to submit a correction.
-                      </p>
-                    ) : feedbackSubmitted ? (
-                      <div className="feedback-success-badge">
-                        <span>✓</span>
-                        <span>{feedbackMessage}</span>
-                      </div>
-                    ) : (
-                      <div>
-                        {!isSelectingCorrection ? (
-                          <div>
-                            <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--dark)", marginBottom: "10px" }}>
-                              {result.model_decision?.accepted
-                                ? <>Is this garment actually <b>{result.fabric.toUpperCase()}</b>?</>
-                                : <>The AI couldn&apos;t confidently match this fabric — help correct it:</>}
-                            </p>
-                            <div className="feedback-actions">
-                              {/* Audit P1-3: never offer "Yes, correct" for a prediction
-                                  the model itself rejected — that launders guesses
-                                  into "verified correct" training candidates. */}
-                              {result.model_decision?.accepted && (
-                                <button
-                                  type="button"
-                                  className="feedback-correct-btn"
-                                  onClick={() => submitFeedback(result.model_decision?.top_fabric || result.fabric, true)}
-                                >
-                                  ✓ Yes, it's {result.fabric.toUpperCase()} (Submit for Review)
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="feedback-wrong-btn"
-                                onClick={() => setIsSelectingCorrection(true)}
-                              >
-                                {result.model_decision?.accepted ? "✗ No, it's a different fabric" : "Select the actual fabric"}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="feedback-picker">
-                            <p style={{ fontSize: "13.5px", fontWeight: 700, color: "var(--dark)", marginBottom: "8px" }}>
-                              Select the actual fabric type to submit this image for administrator review:
-                            </p>
-                            <div className="tag-container">
-                              {[
-                                ["cotton", "🌱 Cotton"],
-                                ["polyester", "🧶 Polyester"],
-                                ["denim", "👖 Denim"],
-                                ["wool", "🐑 Wool"],
-                                ["silk", "🪡 Silk"],
-                                ["non_fabric", "🚫 Non-Fabric"]
-                              ].map(([k, label]) => (
-                                <button
-                                  key={k}
-                                  type="button"
-                                  className="tag-chip"
-                                  style={{ padding: "6px 14px", fontWeight: 700 }}
-                                  onClick={() => submitFeedback(k, false)}
-                                >
-                                  {label}
-                                </button>
-                              ))}
-                              <button
-                                type="button"
-                                className="tag-chip"
-                                style={{ background: "var(--surface-alt)", color: "var(--text-light)" }}
-                                onClick={() => setIsSelectingCorrection(false)}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Rejection / Unknown Handling */}
-                  {!result.model_decision?.accepted && (
-                    <div style={{ background: "var(--warning-light)", border: "1px solid var(--warning-border)", borderRadius: "var(--radius-sm)", padding: "16px", marginTop: "20px" }}>
-                      <h4 style={{ color: "var(--warning)", marginBottom: "4px" }}>⚠️ Low Confidence or Non-Fabric Input</h4>
-                      <p style={{ fontSize: "14px", color: "var(--dark)" }}>
-                        {result.model_decision?.reason || "The AI could not confidently match this surface with supported fabric profiles."}
-                      </p>
-                      <ul style={{ fontSize: "13px", color: "var(--text-muted)", marginTop: "8px", paddingLeft: "20px" }}>
-                        <li>Retake the photo closer to the cloth surface</li>
-                        <li>Ensure even natural lighting without harsh glare</li>
-                        <li>Flatten folds or wrinkles for clear weave texture visibility</li>
-                      </ul>
-                    </div>
-                  )}
-
                   {/* ============================================================
                       STAGE 2 — Detail Subtab Bar: Care | Stains | Dosing
                       ============================================================ */}
@@ -1521,7 +1665,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                             onClick={() => setDetailSubtab(tab)}
                             className={`pill-tab ${detailSubtab === tab ? "active" : "inactive"}`}
                           >
-                            {tab === "care" ? "🫧 Care" : tab === "stains" ? "🧪 Stains" : "⚗️ Dosing"}
+                            {tab === "care" ? <><IconWash size={15} /> Care</> : tab === "stains" ? <><IconFlask size={15} /> Stains</> : <><IconDosing size={15} /> Dosing</>}
                           </button>
                         ))}
                       </div>
@@ -1529,31 +1673,31 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       {/* ── TAB 1: Care Profile ── */}
                       {detailSubtab === "care" && (
                         <>
-                          <h3 style={{ fontSize: "18px", marginBottom: "14px" }}>Recommended Care Profile</h3>
+                          <h3 className="care-profile-title">Recommended Care Profile</h3>
                           <div className="care-profile-grid">
                             <div className="care-card">
-                              <div className="care-card-icon">🫧</div>
+                              <div className="care-card-icon"><IconWash size={26} /></div>
                               <div className="care-card-label">WASHING</div>
                               <div className="care-card-value">{convertTempText(result.recommendation.wash.temperature, tempUnit)}</div>
-                              <span style={{ fontSize: "12px", color: "var(--text-light)" }}>{result.recommendation.wash.cycle}</span>
+                              <span className="care-card-cycle">{result.recommendation.wash.cycle}</span>
                             </div>
                             <div className="care-card">
-                              <div className="care-card-icon">◌</div>
+                              <div className="care-card-icon"><IconDry size={26} /></div>
                               <div className="care-card-label">DRYING</div>
                               <div className="care-card-value">{result.recommendation.dry}</div>
                             </div>
                             <div className="care-card">
-                              <div className="care-card-icon">♨</div>
+                              <div className="care-card-icon"><IconIron size={26} /></div>
                               <div className="care-card-label">IRONING</div>
                               <div className="care-card-value">{result.recommendation.iron}</div>
                             </div>
                             <div className="care-card">
-                              <div className="care-card-icon">✦</div>
+                              <div className="care-card-icon"><IconDetergent size={26} /></div>
                               <div className="care-card-label">DETERGENT</div>
                               <div className="care-card-value">{result.recommendation.wash.detergent || "Mild formula"}</div>
                             </div>
                             <div className="care-card">
-                              <div className="care-card-icon">🚫</div>
+                              <div className="care-card-icon"><IconBleach size={26} /></div>
                               <div className="care-card-label">BLEACH</div>
                               <div className="care-card-value">{result.recommendation.bleach}</div>
                             </div>
@@ -1565,7 +1709,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                           </div>
 
                           <div className="eco-tip-box">
-                            <strong>🌱 Eco-Friendly Care Practices:</strong>
+                            <strong><IconLeaf size={15} /> Eco-Friendly Care Practices:</strong>
                             <ul className="eco-tip-list">
                               {result.recommendation.eco.map((tip, idx) => (
                                 <li key={idx}>{tip}</li>
@@ -1672,7 +1816,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                                       onClick={() => setLoadWeight(v)}
                                       className={`dosing-opt ${loadWeight === v ? "active-primary" : "inactive"}`}
                                     >
-                                      {v === "small" ? "🪶 Small" : v === "medium" ? "👕 Medium" : "🏋️ Large"}
+                                      {v === "small" ? <><IconFeather size={14} /> Small</> : v === "medium" ? <><IconShirt size={14} /> Medium</> : <><IconKettlebell size={14} /> Large</>}
                                     </button>
                                   ))}
                                 </div>
@@ -1689,7 +1833,7 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                                       onClick={() => setSoilLevel(v)}
                                       className={`dosing-opt ${soilLevel === v ? "active-secondary" : "inactive"}`}
                                     >
-                                      {v === "light" ? "✨ Light" : v === "normal" ? "👔 Normal" : "🏚️ Heavy"}
+                                      {v === "light" ? <><IconSparkle size={14} /> Light</> : v === "normal" ? <><IconShirt size={14} /> Normal</> : <><IconLayers size={14} /> Heavy</>}
                                     </button>
                                   ))}
                                 </div>
@@ -1708,10 +1852,10 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
 
                             {/* Detergent tip */}
                             <div className="detergent-tip">
-                              <strong>💡 Detergent Tip:</strong> {detergentTip[fabricKey] ?? "Use a mild, fabric-appropriate detergent."}
+                              <strong><IconBulb size={14} /> Detergent Tip:</strong> {detergentTip[fabricKey] ?? "Use a mild, fabric-appropriate detergent."}
                               {result.recommendation && (
                                 <span className="detergent-tip-extra">
-                                  🌡️ Wash at <strong>{convertTempText(result.recommendation.wash.temperature, tempUnit)}</strong> · {result.recommendation.wash.cycle} cycle
+                                  <IconThermo size={14} /> Wash at <strong>{convertTempText(result.recommendation.wash.temperature, tempUnit)}</strong> · {result.recommendation.wash.cycle} cycle
                                 </span>
                               )}
                             </div>
@@ -1747,6 +1891,109 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
                       </div>
                     </>
                   )}
+
+                  {/* Rejection / Unknown Handling */}
+                  {!result.model_decision?.accepted && (
+                    <div className="rejection-notice">
+                      <h4>⚠️ Low Confidence or Non-Fabric Input</h4>
+                      <p>
+                        {result.model_decision?.reason || "The AI could not confidently match this surface with supported fabric profiles."}
+                      </p>
+                      <ul>
+                        <li>Retake the photo closer to the cloth surface</li>
+                        <li>Ensure even natural lighting without harsh glare</li>
+                        <li>Flatten folds or wrinkles for clear weave texture visibility</li>
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* ========================================================
+                      HUMAN-IN-THE-LOOP ACTIVE LEARNING FEEDBACK BOX
+                      ======================================================== */}
+                  <div className="feedback-box">
+                    <div className="feedback-title">
+                      <span>🎯 Active Learning Feedback & Continuous Dataset Training</span>
+                    </div>
+                    <p className="feedback-desc">
+                      Help LaundryAI learn. Your correction enters a private review queue; an administrator checks the label before it can become training data.
+                    </p>
+
+                    {result.feedback_available === false || result.id == null ? (
+                      <p className="feedback-unavailable">
+                        Feedback is unavailable for this scan because it could not be saved. Rescan to submit a correction.
+                      </p>
+                    ) : feedbackSubmitted ? (
+                      <div className="feedback-success-badge">
+                        <span>✓</span>
+                        <span>{feedbackMessage}</span>
+                      </div>
+                    ) : (
+                      <div>
+                        {!isSelectingCorrection ? (
+                          <div>
+                            <p className="feedback-question">
+                              {result.model_decision?.accepted
+                                ? <>Is this garment actually <b>{result.fabric.toUpperCase()}</b>?</>
+                                : <>The AI couldn&apos;t confidently match this fabric — help correct it:</>}
+                            </p>
+                            <div className="feedback-actions">
+                              {/* Audit P1-3: never offer "Yes, correct" for a prediction
+                                  the model itself rejected — that launders guesses
+                                  into "verified correct" training candidates. */}
+                              {result.model_decision?.accepted && (
+                                <button
+                                  type="button"
+                                  className="feedback-correct-btn"
+                                  onClick={() => submitFeedback(result.model_decision?.top_fabric || result.fabric, true)}
+                                >
+                                  ✓ Yes, it's {result.fabric.toUpperCase()} (Submit for Review)
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="feedback-wrong-btn"
+                                onClick={() => setIsSelectingCorrection(true)}
+                              >
+                                {result.model_decision?.accepted ? "✗ No, it's a different fabric" : "Select the actual fabric"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="feedback-picker">
+                            <p className="feedback-picker-title">
+                              Select the actual fabric type to submit this image for administrator review:
+                            </p>
+                            <div className="tag-container">
+                              {[
+                                ["cotton", "🌱 Cotton"],
+                                ["polyester", "🧶 Polyester"],
+                                ["denim", "👖 Denim"],
+                                ["wool", "🐑 Wool"],
+                                ["silk", "🪡 Silk"],
+                                ["non_fabric", "🚫 Non-Fabric"]
+                              ].map(([k, label]) => (
+                                <button
+                                  key={k}
+                                  type="button"
+                                  className="tag-chip feedback-fabric-chip"
+                                  onClick={() => submitFeedback(k, false)}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                              <button
+                                type="button"
+                                className="tag-chip feedback-cancel-chip"
+                                onClick={() => setIsSelectingCorrection(false)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                 </div>
               </MotionSection>
@@ -1882,14 +2129,29 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
         <LibraryPage initialKey={selectedFabricKey} tempUnit={tempUnit} />
       )}
 
-      {page === "admin" && user.is_admin && <AdminConsole user={user} />}
+      {page === "admin" && user.is_admin && (
+        <Suspense fallback={<p className="admin-panel-loading" role="status">Loading…</p>}>
+          <AdminConsole user={user} />
+        </Suspense>
+      )}
 
       {/* ========================================================
           HISTORY PAGE (My Scans)
           ======================================================== */}
       {page === "history" && (
         <MotionPage className="page-container">
-          <HistoryPage />
+          <HistoryPage onScan={() => setPage("analyze")} />
+        </MotionPage>
+      )}
+
+      {/* ========================================================
+          LOAD BUILDER PAGE
+          ======================================================== */}
+      {page === "loads" && (
+        <MotionPage className="page-container">
+          <Suspense fallback={<p className="admin-panel-loading" role="status">Loading…</p>}>
+            <LoadBuilderPage tempUnit={tempUnit} />
+          </Suspense>
         </MotionPage>
       )}
 
@@ -1919,22 +2181,22 @@ function App({ user, onSignOut }: { user: SignedInUser; onSignOut: () => Promise
               <h3>Technology Stack</h3>
               <div className="care-profile-grid" style={{ marginTop: "16px" }}>
                 <div className="care-card">
-                  <div className="care-card-icon">⚡</div>
+                  <div className="care-card-icon"><IconBolt size={26} /></div>
                   <div className="care-card-label">BACKEND</div>
                   <div className="care-card-value">FastAPI (Python)</div>
                 </div>
                 <div className="care-card">
-                  <div className="care-card-icon">🧠</div>
+                  <div className="care-card-icon"><IconChip size={26} /></div>
                   <div className="care-card-label">AI INFERENCE</div>
                   <div className="care-card-value">PyTorch TorchScript</div>
                 </div>
                 <div className="care-card">
-                  <div className="care-card-icon">⚛️</div>
+                  <div className="care-card-icon"><IconAtom size={26} /></div>
                   <div className="care-card-label">FRONTEND</div>
                   <div className="care-card-value">React + TypeScript</div>
                 </div>
                 <div className="care-card">
-                  <div className="care-card-icon">💾</div>
+                  <div className="care-card-icon"><IconDatabase size={26} /></div>
                               <div className="care-card-label">DATABASE</div>
                               <div className="care-card-value">Firebase RTDB (cloud) · SQLite (local dev)</div>
                 </div>

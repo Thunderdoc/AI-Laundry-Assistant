@@ -9,3 +9,9 @@ firebase-admin>=6.5
 # Imported directly for Firebase ID-token signature verification.
 google-auth>=2.30
 python-dotenv>=1.0
+# Test-suite token signing (backend/tests): the Firebase token-verification
+# tests sign RS256 tokens with PyJWT + cryptography. Without these declared,
+# that whole test class silently skips in a requirements-only environment
+# (audit 2026-11-03: suite ran "green" at 54 passed / 7 skipped).
+PyJWT>=2.8
+cryptography>=42

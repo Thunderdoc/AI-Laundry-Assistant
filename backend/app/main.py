@@ -6,12 +6,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Body, Response, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-from PIL import Image, ImageStat
+from PIL import Image, ImageOps, ImageStat
 from .knowledge_base import FABRICS, recommendation
 from . import firebase_store, supabase_store
 
@@ -34,11 +35,14 @@ known_origins={
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(configured_origins | known_origins),
-    # Branch previews (Vercel) and sandboxes serve from generated hostnames that
-    # cannot be enumerated ahead of time. A CORS-blocked `/api/auth/config`
-    # makes the browser treat the API as unreachable and used to leave sign-in
-    # hanging, so accept the provider's generated hosts as well.
-    allow_origin_regex=r"https://[a-z0-9-]+\.(vercel\.app|e2b\.app)",
+    # Branch previews (Vercel) serve from generated hostnames that cannot be
+    # enumerated ahead of time. A CORS-blocked `/api/auth/config` makes the
+    # browser treat the API as unreachable and used to leave sign-in hanging,
+    # so accept this project's own generated preview hosts as well. The regex
+    # used to trust EVERY *.vercel.app and *.e2b.app hostname with credentials
+    # (audit 2026-11-03, M-1); it is now scoped to ai-laundry-assistant*
+    # hostnames only — the project's production and preview hosts.
+    allow_origin_regex=r"https://ai-laundry-assistant[a-z0-9-]*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
@@ -478,7 +482,11 @@ def health(probe: bool = True):
     state=model_status()
     persistence=store.status(probe=probe)
     healthy=state["ready"] and persistence["configured"] and persistence.get("reachable",True)
-    return {"status":"ok" if healthy else "degraded", "model_ready":state["ready"], "model_error":state["error"], "persistence":persistence}
+    # Audit 2026-11-03, M-2: when Firebase config is incomplete the auth
+    # middleware silently disables itself and identity falls back to a
+    # client-chosen header. Surface that state here so monitors can see the
+    # degradation instead of it looking identical to a healthy payload.
+    return {"status":"ok" if healthy else "degraded", "model_ready":state["ready"], "model_error":state["error"], "auth":"enabled" if firebase_auth_enabled() else "disabled", "persistence":persistence}
 
 @app.get("/api/auth/config")
 def firebase_auth_config():
@@ -605,6 +613,17 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
         chunks.append(chunk)
     data=b"".join(chunks)
     if not data: raise HTTPException(413,"Image must be between 1 byte and 10 MB.")
+    # Everything after the upload read is blocking work (PIL decode, JPEG
+    # re-encode, image stats, torch inference, persistence). Running it
+    # inline stalled the event loop — one scan froze every other request
+    # for seconds (audit 2026-11-03, M-4) — so it runs in the threadpool.
+    # Only the async upload read stays on the loop; the response shape and
+    # the saved / saved_local_only / persistence_warning semantics are
+    # produced by _predict_from_bytes exactly as before.
+    return await run_in_threadpool(_predict_from_bytes, request, data, note)
+
+
+def _predict_from_bytes(request: Request, data: bytes, note: Optional[str]):
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error",Image.DecompressionBombWarning)
@@ -612,6 +631,13 @@ async def predict(request: Request, image:UploadFile=File(...), note:Optional[st
             source.verify()
             source=Image.open(io.BytesIO(data))
             source.load()
+            # Phone photos carry their rotation in EXIF; decoding the raw
+            # pixel matrix scores a sideways image the user never saw
+            # (audit 2026-11-03, M-3). Transpose BEFORE anything else reads
+            # the pixels, so inference, quality stats and the stored JPEG
+            # all use the orientation the user sees. The offline evaluation
+            # harness mirrors this so the accuracy gate stays comparable.
+            source=ImageOps.exif_transpose(source)
             if source.width>6000 or source.height>6000: raise ValueError("Image dimensions are too large")
             im=source.convert("RGB")
     except (Image.DecompressionBombError,Image.DecompressionBombWarning): raise HTTPException(413,"Image dimensions are too large.")
@@ -1584,6 +1610,12 @@ if os.path.isdir(FRONTEND_DIST):
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend_app(path: str):
+        # Unmatched /api/* paths must not fall through to the SPA: API
+        # clients and monitors read a 200 text/html as success (audit
+        # 2026-11-03, L-1). Only the catch-all is intercepted here —
+        # endpoints that matched a route keep their own 404 messages.
+        if path == "api" or path.startswith("api/"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         resolved = resolve_frontend_file(path)
         if resolved:
             return FileResponse(resolved)

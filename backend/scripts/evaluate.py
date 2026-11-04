@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "backend"))
@@ -107,7 +107,9 @@ for cls in classes:
         if path.name in denylisted:
             skipped += 1
             continue
-        im = Image.open(path).convert("RGB")
+        # Mirror /api/predict: honour EXIF orientation so offline metrics
+        # measure the same pixels production inference sees (audit M-3).
+        im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
         rows_single.append((cls, probs_single(im)))
         rows_five.append((cls, probs_five_crop(im)))
 if skipped:
