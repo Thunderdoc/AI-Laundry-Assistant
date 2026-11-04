@@ -1,0 +1,8 @@
+{
+  "model_file": "fabric_mobilenetv2_v2.pt",
+  "source": "exp3 chunk2_best (Kaggle laundry-v4-exp3-cleanheavy)",
+  "md5": "7b89bbe4f32b722c4c4c982e3883f6f1",
+  "bytes": 9294884,
+  "parts": 13,
+  "part_encoding": "base64, concatenated in filename order, no separators"
+}

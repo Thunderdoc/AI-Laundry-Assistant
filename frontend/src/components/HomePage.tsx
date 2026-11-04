@@ -38,18 +38,21 @@ const DEMO_SCAN = [
 
 /**
  * Evaluation numbers declared in the shipped model's manifest
- * (fabric_mobilenetv2.manifest.json: test_accuracy 0.8303, macro_f1 0.8278,
+ * (fabric_mobilenetv2_v2.manifest.json: test_accuracy 0.8087, macro_f1 0.8233,
  * test_images 277 — five leaked non-fabric copies excluded from the 282-image
  * held-out split). They are shown as-is and labeled, never extrapolated.
  * Corrected 2026-11-03 (audit P0-4): the band previously cited an older
  * artifact's 79.4% / 282 / 0.80 figures.
+ * Updated 2026-11-04: model v2 (exp3) replaced v1 — chosen for real-photo
+ * accuracy (0.5867 vs 0.0819 on held-out whole-garment photos); the clean
+ * held-out test figures below are v2's own, exactly as its manifest declares.
  */
 const LANDING_STATS: { value: number; decimals: number; suffix: string; label: string }[] = [
   { value: 6, decimals: 0, suffix: "", label: "Fabric classes (+ non-fabric rejection)" },
-  { value: 3940, decimals: 0, suffix: "", label: "Curated training images" },
+  { value: 6848, decimals: 0, suffix: "", label: "Training images" },
   { value: 277, decimals: 0, suffix: "", label: "Held-out test images" },
-  { value: 83.03, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
-  { value: 0.83, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
+  { value: 80.87, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
+  { value: 0.82, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
   { value: 4, decimals: 0, suffix: "", label: "UI languages · °C/°F anywhere" },
 ];
 

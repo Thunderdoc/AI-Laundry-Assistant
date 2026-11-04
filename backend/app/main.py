@@ -1,4 +1,5 @@
 import csv, io, json, os, shutil, sqlite3, threading, time, uuid, warnings
+import base64, hashlib, tempfile
 from urllib import request as urlrequest
 from urllib.parse import urlsplit, urlunsplit
 from collections import defaultdict, deque
@@ -376,6 +377,78 @@ _bundled_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".
 # host and false on another with no visible difference. An explicit MODEL_PATH
 # still wins (operator choice); a retrain only ships by deliberately replacing
 # the bundled file, never by landing next to it.
+# Exception (2026-11-04): the v2 model ships as md5-verified base64 text parts
+# (backend/models/fabric_v2_parts/) because the deploy pipeline carries text
+# only. When the parts are present and verify, the assembled v2 model wins
+# over the v1 bundled file; the v1 .pt and its manifest stay untouched, and
+# deleting the parts directory is the rollback.
+_V2_MODEL_BASENAME = "fabric_mobilenetv2_v2.pt"
+_ASSEMBLED_MANIFEST_PATH = None
+
+def _md5_of_file(path):
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def assemble_v2_model():
+    """Reassemble the v2 TorchScript model from its base64 parts.
+
+    Returns the path of an md5-verified assembled copy, or None when the
+    parts are absent or fail verification — the caller then falls back to
+    the bundled v1 model, whose manifest is derived from its own path, so
+    a corrupt part can never produce a mixed model/manifest pair. Paths
+    derive from _bundled_model_path at call time, like the rest of the
+    model-path resolution.
+    """
+    global _ASSEMBLED_MANIFEST_PATH
+    models_dir = os.path.dirname(_bundled_model_path)
+    parts_dir = os.path.join(models_dir, "fabric_v2_parts")
+    info_path = os.path.join(parts_dir, "parts.json")
+    if not os.path.isfile(info_path):
+        return None
+    try:
+        with open(info_path, encoding="utf-8") as handle:
+            info = json.load(handle)
+        expected_md5 = str(info["md5"]).lower()
+        part_count = int(info["parts"])
+    except Exception:
+        return None
+    targets = [
+        os.path.join(models_dir, _V2_MODEL_BASENAME),
+        os.path.join(tempfile.gettempdir(), _V2_MODEL_BASENAME),
+    ]
+    for target in targets:
+        try:
+            if os.path.isfile(target) and _md5_of_file(target) == expected_md5:
+                _ASSEMBLED_MANIFEST_PATH = os.path.join(models_dir, "fabric_mobilenetv2_v2.manifest.json")
+                return target
+        except OSError:
+            continue
+    try:
+        encoded = "".join(
+            open(os.path.join(parts_dir, f"part-{index:03d}.txt"), encoding="utf-8").read()
+            for index in range(part_count)
+        )
+        raw = base64.b64decode("".join(encoded.split()), validate=True)
+    except Exception:
+        return None
+    if hashlib.md5(raw).hexdigest() != expected_md5:
+        return None
+    for target in targets:
+        try:
+            staging = target + ".tmp"
+            with open(staging, "wb") as handle:
+                handle.write(raw)
+            os.replace(staging, target)
+            _ASSEMBLED_MANIFEST_PATH = os.path.join(models_dir, "fabric_mobilenetv2_v2.manifest.json")
+            print(f"LaundryAI v2 model assembled from parts -> {target}")
+            return target
+        except OSError:
+            continue
+    return None
+
 def resolve_model_path() -> str:
     configured = os.getenv("MODEL_PATH", "").strip()
     candidates = []
@@ -385,6 +458,10 @@ def resolve_model_path() -> str:
         # repository-relative value as well, so either models/... or
         # backend/models/... works without silently disabling inference.
         candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", configured)))
+    else:
+        assembled = assemble_v2_model()
+        if assembled:
+            candidates.append(assembled)
     candidates.extend((_bundled_model_path, _default_model_path))
     for candidate in candidates:
         if os.path.isfile(candidate):
@@ -423,7 +500,14 @@ def model_status():
     except Exception:
         return {"ready": False, "error": _MODEL_ERROR or "Model validation failed.", "path": os.path.basename(MODEL_PATH)}
 
-def manifest_path(): return os.path.splitext(MODEL_PATH)[0] + ".manifest.json"
+def manifest_path():
+    derived = os.path.splitext(MODEL_PATH)[0] + ".manifest.json"
+    # An assembled v2 model cached outside the models dir (e.g. /tmp when the
+    # repo tree is read-only) has no manifest beside it; use the v2 manifest
+    # that ships next to the parts.
+    if _ASSEMBLED_MANIFEST_PATH and not os.path.exists(derived):
+        return _ASSEMBLED_MANIFEST_PATH
+    return derived
 
 def load_manifest():
     path=manifest_path()

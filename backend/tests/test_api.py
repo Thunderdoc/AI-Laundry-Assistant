@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import json
 import os
@@ -1114,6 +1115,79 @@ class TestAudit2026Fixes(unittest.TestCase):
         res = self.client.get("/some-spa-route")
         self.assertEqual(res.status_code, 200)
         self.assertIn("text/html", res.headers.get("content-type", ""))
+
+
+class TestV2ModelParts(unittest.TestCase):
+    """The v2 model ships as base64 text parts (the deploy pipeline carries
+    text only). Pin the assembly contract: the parts decode to exactly the
+    md5 recorded in parts.json, the assembled TorchScript loads and returns
+    one score per manifest class, and the app actually resolves to the v2
+    model + v2 manifest pair (rollback = removing the parts directory)."""
+
+    def test_parts_assemble_to_verified_model(self):
+        from app import main as app_main
+        models_dir = os.path.dirname(app_main._bundled_model_path)
+        info_path = os.path.join(models_dir, "fabric_v2_parts", "parts.json")
+        self.assertTrue(os.path.isfile(info_path), "v2 parts must ship with the backend")
+        with open(info_path, encoding="utf-8") as handle:
+            info = json.load(handle)
+        path = app_main.assemble_v2_model()
+        self.assertIsNotNone(path, "present, valid parts must assemble")
+        digest = hashlib.md5()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        self.assertEqual(digest.hexdigest(), info["md5"])
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable: {exc}")
+        model = torch.jit.load(path, map_location="cpu").eval()
+        with torch.no_grad():
+            output = model(torch.zeros(1, 3, 224, 224))
+        self.assertEqual(tuple(output.shape), (1, 6))
+
+    def test_incomplete_or_corrupt_parts_fall_back_to_none(self):
+        """A partial parts landing must never activate v2: assembly refuses
+        (returns None) when a part is missing or the decoded bytes fail the
+        md5 recorded in parts.json, so resolve_model_path keeps serving the
+        bundled v1 model until the complete, verified parts set is present."""
+        import shutil
+        import tempfile
+        from unittest import mock
+        from app import main as app_main
+        models_dir = os.path.dirname(app_main._bundled_model_path)
+        src_parts = os.path.join(models_dir, "fabric_v2_parts")
+        with open(os.path.join(src_parts, "parts.json"), encoding="utf-8") as handle:
+            info = json.load(handle)
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_models = os.path.join(tmp, "models")
+            fake_parts = os.path.join(fake_models, "fabric_v2_parts")
+            os.makedirs(fake_parts)
+            shutil.copy(os.path.join(src_parts, "parts.json"), fake_parts)
+            # Incomplete set: only the first part present.
+            shutil.copy(os.path.join(src_parts, "part-000.txt"), fake_parts)
+            with mock.patch.object(app_main, "_bundled_model_path", os.path.join(fake_models, "fabric_mobilenetv2.pt")), \
+                 mock.patch.object(app_main.tempfile, "gettempdir", return_value=tmp):
+                self.assertIsNone(app_main.assemble_v2_model())
+                # Complete set but one part corrupted: md5 must refuse it.
+                for index in range(int(info["parts"])):
+                    shutil.copy(os.path.join(src_parts, f"part-{index:03d}.txt"), fake_parts)
+                last = os.path.join(fake_parts, f"part-{int(info['parts']) - 1:03d}.txt")
+                with open(last, encoding="utf-8") as handle:
+                    text = handle.read()
+                flipped = ("A" if text[0] != "A" else "B") + text[1:]
+                with open(last, "w", encoding="utf-8") as handle:
+                    handle.write(flipped)
+                self.assertIsNone(app_main.assemble_v2_model())
+
+    def test_app_resolves_to_v2_model_and_manifest(self):
+        from app import main as app_main
+        self.assertTrue(app_main.MODEL_PATH.endswith("fabric_mobilenetv2_v2.pt"), app_main.MODEL_PATH)
+        manifest = app_main.load_manifest()
+        self.assertEqual(manifest.get("test_accuracy"), 0.8087)
+        self.assertEqual(manifest.get("min_confidence"), 0.55)
+        self.assertEqual(manifest.get("min_margin"), 0.10)
 
 
 if __name__ == "__main__":
