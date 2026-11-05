@@ -1,0 +1,8 @@
+{
+  "model_file": "fabric_ens_exp2.pt",
+  "source": "exp2 stage B final (Kaggle laundry-v4-exp2-twostage), ensemble member 3 of 3",
+  "md5": "ddd14c72afc735cc487269a920fed7f4",
+  "bytes": 9304802,
+  "parts": 13,
+  "part_encoding": "base64, concatenated in filename order, no separators"
+}
