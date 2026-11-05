@@ -1,0 +1,8 @@
+{
+  "model_file": "fabric_ens_exp6.pt",
+  "source": "exp6 chunk1_final (Kaggle laundry-v4-exp6-v5-ladder), ensemble member 2 of 3",
+  "md5": "c1bea9a1c28cb1a2ab83d29243f78a7c",
+  "bytes": 9304802,
+  "parts": 13,
+  "part_encoding": "base64, concatenated in filename order, no separators"
+}
