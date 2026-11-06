@@ -46,13 +46,22 @@ const DEMO_SCAN = [
  * Updated 2026-11-04: model v2 (exp3) replaced v1 — chosen for real-photo
  * accuracy (0.5867 vs 0.0819 on held-out whole-garment photos); the clean
  * held-out test figures below are v2's own, exactly as its manifest declares.
+ * Updated 2026-11-05: the serving model is now the 3-model ensemble
+ * (fabric_ensemble.manifest.json: test_accuracy 0.8195, macro_f1 0.8355,
+ * test_images 277; real-photo 0.6140 vs exp3's 0.5867) — the figures below
+ * are the ensemble manifest's own, exactly as it declares.
+ * Updated 2026-11-05 (combo b): the ensemble is now 4 models — the exp12
+ * distilled EffNet-B0 at weight 0.5 plus exp3/exp6/exp2 at 1/6 each
+ * (fabric_ensemble.manifest.json: test_accuracy 0.8303, macro_f1 0.8350,
+ * test_images 277; real-photo 0.6569 vs exp3's 0.5867) — the figures below
+ * are the ensemble manifest's own, exactly as it declares.
  */
 const LANDING_STATS: { value: number; decimals: number; suffix: string; label: string }[] = [
   { value: 6, decimals: 0, suffix: "", label: "Fabric classes (+ non-fabric rejection)" },
   { value: 6848, decimals: 0, suffix: "", label: "Training images" },
   { value: 277, decimals: 0, suffix: "", label: "Held-out test images" },
-  { value: 80.87, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
-  { value: 0.82, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
+  { value: 83.03, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
+  { value: 0.84, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
   { value: 4, decimals: 0, suffix: "", label: "UI languages · °C/°F anywhere" },
 ];
 

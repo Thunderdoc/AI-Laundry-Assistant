@@ -1182,12 +1182,254 @@ class TestV2ModelParts(unittest.TestCase):
                 self.assertIsNone(app_main.assemble_v2_model())
 
     def test_app_resolves_to_v2_model_and_manifest(self):
+        # Since 2026-11-05 the serving manifest is the ensemble's (see
+        # TestEnsembleModelShip below). MODEL_PATH still resolves to the
+        # v2 (exp-3) model — it is both an ensemble member and the
+        # single-model fallback — and the v2 manifest stays on disk,
+        # untouched, still declaring its own 0.8087 for rollback.
         from app import main as app_main
         self.assertTrue(app_main.MODEL_PATH.endswith("fabric_mobilenetv2_v2.pt"), app_main.MODEL_PATH)
         manifest = app_main.load_manifest()
-        self.assertEqual(manifest.get("test_accuracy"), 0.8087)
+        self.assertEqual(manifest.get("model_version"), "ensemble-b-20261105")
+        self.assertEqual(manifest.get("test_accuracy"), 0.8303)
         self.assertEqual(manifest.get("min_confidence"), 0.55)
         self.assertEqual(manifest.get("min_margin"), 0.10)
+        models_dir = os.path.dirname(app_main._bundled_model_path)
+        with open(os.path.join(models_dir, "fabric_mobilenetv2_v2.manifest.json"), encoding="utf-8") as handle:
+            v2_manifest = json.load(handle)
+        self.assertEqual(v2_manifest.get("test_accuracy"), 0.8087)
+
+
+class _FixedLogitsModel:
+    """Callable stand-in for a TorchScript model: returns the same logits
+    row for every crop in the batch, so ensemble maths is deterministic."""
+
+    def __init__(self, logits):
+        self.logits = logits
+
+    def __call__(self, batch):
+        import torch
+        row = torch.tensor([self.logits], dtype=torch.float32)
+        return row.repeat(batch.shape[0], 1)
+
+
+class TestEnsembleModelShip(unittest.TestCase):
+    """The 2026-11-05 ensemble ship (combo b): /api/predict serves the
+    weighted probability average of exp-12 (distilled EffNet-B0, weight
+    0.5) + exp-3 + exp-6 + exp-2 (1/6 each) — measured clean 0.8303 /
+    real-photo 0.6569 / dim 0.6296. Pin the whole contract: every member's
+    parts assemble md5-verified, a partial or corrupt member disables ONLY
+    the ensemble (single-model chain keeps serving), and predict really
+    averages the members' probabilities before the unchanged gates."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+
+    def test_ensemble_parts_assemble_to_verified_models(self):
+        from app import main as app_main
+        models_dir = os.path.dirname(app_main._bundled_model_path)
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable: {exc}")
+        for parts_dir_name, _weight in app_main._ensemble_config():
+            info_path = os.path.join(models_dir, parts_dir_name, "parts.json")
+            self.assertTrue(os.path.isfile(info_path), f"{parts_dir_name} parts must ship with the backend")
+            with open(info_path, encoding="utf-8") as handle:
+                info = json.load(handle)
+            path = app_main._assemble_parts_model(parts_dir_name)
+            self.assertIsNotNone(path, f"present, valid {parts_dir_name} parts must assemble")
+            digest = hashlib.md5()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            self.assertEqual(digest.hexdigest(), info["md5"], parts_dir_name)
+            model = torch.jit.load(path, map_location="cpu").eval()
+            with torch.no_grad():
+                output = model(torch.zeros(1, 3, 224, 224))
+            self.assertEqual(tuple(output.shape), (1, 6), parts_dir_name)
+
+    def test_ensemble_incomplete_or_corrupt_parts_fall_back_to_none(self):
+        """A partial ensemble landing must never activate the ensemble:
+        resolution returns None while any member's parts are missing or
+        fail their md5, so the single-model chain keeps serving until the
+        complete, verified member set is present."""
+        import shutil
+        import tempfile
+        from unittest import mock
+        from app import main as app_main
+        models_dir = os.path.dirname(app_main._bundled_model_path)
+        env = dict(os.environ)
+        env.pop("MODEL_PATH", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_models = os.path.join(tmp, "models")
+            os.makedirs(fake_models)
+            shutil.copy(os.path.join(models_dir, "fabric_ensemble.manifest.json"), fake_models)
+            infos = {}
+            for parts_dir_name, _weight in app_main._ensemble_config():
+                src_parts = os.path.join(models_dir, parts_dir_name)
+                fake_parts = os.path.join(fake_models, parts_dir_name)
+                os.makedirs(fake_parts)
+                with open(os.path.join(src_parts, "parts.json"), encoding="utf-8") as handle:
+                    infos[parts_dir_name] = json.load(handle)
+                shutil.copy(os.path.join(src_parts, "parts.json"), fake_parts)
+            def copy_parts(parts_dir_name, skip_last=False):
+                src_parts = os.path.join(models_dir, parts_dir_name)
+                fake_parts = os.path.join(fake_models, parts_dir_name)
+                count = int(infos[parts_dir_name]["parts"]) - (1 if skip_last else 0)
+                for index in range(count):
+                    shutil.copy(os.path.join(src_parts, f"part-{index:03d}.txt"), fake_parts)
+            # v2 + exp2 + exp12 complete; exp6 incomplete (first part only).
+            copy_parts("fabric_v2_parts")
+            copy_parts("fabric_ens_exp2_parts")
+            copy_parts("fabric_ens_exp12_parts")
+            shutil.copy(os.path.join(models_dir, "fabric_ens_exp6_parts", "part-000.txt"),
+                        os.path.join(fake_models, "fabric_ens_exp6_parts"))
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(app_main, "_bundled_model_path", os.path.join(fake_models, "fabric_mobilenetv2.pt")), \
+                 mock.patch.object(app_main.tempfile, "gettempdir", return_value=tmp):
+                self.assertIsNone(app_main.resolve_ensemble_model_paths())
+                # Complete exp6 set but its last part corrupted: md5 refuses.
+                copy_parts("fabric_ens_exp6_parts")
+                last = os.path.join(fake_models, "fabric_ens_exp6_parts",
+                                    f"part-{int(infos['fabric_ens_exp6_parts']['parts']) - 1:03d}.txt")
+                with open(last, encoding="utf-8") as handle:
+                    text = handle.read()
+                flipped = ("A" if text[0] != "A" else "B") + text[1:]
+                with open(last, "w", encoding="utf-8") as handle:
+                    handle.write(flipped)
+                self.assertIsNone(app_main.resolve_ensemble_model_paths())
+                # Clean complete set: the ensemble resolves all four members.
+                shutil.copy(os.path.join(models_dir, "fabric_ens_exp6_parts", os.path.basename(last)), last)
+                paths = app_main.resolve_ensemble_model_paths()
+                self.assertIsNotNone(paths)
+                self.assertEqual(len(paths), 4)
+
+    def test_ensemble_definition_is_config_driven_from_manifest(self):
+        """The member list + weights live ONLY in fabric_ensemble.manifest
+        .json: the loader's config mirrors it exactly, in order, and the
+        module-level serving resolution aligns paths with weights."""
+        from app import main as app_main
+        models_dir = os.path.dirname(app_main._bundled_model_path)
+        with open(os.path.join(models_dir, "fabric_ensemble.manifest.json"), encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        declared = [(m["parts_dir"], float(m["weight"])) for m in manifest["ensemble"]["members"]]
+        self.assertEqual(app_main._ensemble_config(), declared)
+        self.assertEqual(len(declared), 4)
+        self.assertAlmostEqual(sum(w for _, w in declared), 1.0, places=9)
+        self.assertEqual([os.path.basename(p) for p in app_main.ENSEMBLE_MODEL_PATHS],
+                         ["fabric_ens_exp12.pt", "fabric_mobilenetv2_v2.pt", "fabric_ens_exp6.pt", "fabric_ens_exp2.pt"])
+        self.assertEqual(app_main.ENSEMBLE_MODEL_WEIGHTS, [w for _, w in declared])
+
+    def test_ensemble_math_honours_manifest_weights(self):
+        """Weighted averaging: a 0.75/0.25 weighting must produce the
+        weighted blend of the members' probabilities — not the equal
+        average and not either member alone (combo decisions like
+        exp7 0.5 + triple 0.5 depend on this being exact)."""
+        from app import main as app_main
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable: {exc}")
+        strong_cotton = _FixedLogitsModel([3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        strong_polyester = _FixedLogitsModel([0.0, 3.0, 0.0, 0.0, 0.0, 0.0])
+        im = Image.new("RGB", (300, 300), color=(120, 90, 60))
+        mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+        weighted = app_main.ensemble_five_crop_probabilities(
+            [strong_cotton, strong_polyester], im, 224, mean, std, weights=[0.75, 0.25])
+        pa = torch.softmax(torch.tensor([3.0, 0.0, 0.0, 0.0, 0.0, 0.0]), dim=0)
+        pb = torch.softmax(torch.tensor([0.0, 3.0, 0.0, 0.0, 0.0, 0.0]), dim=0)
+        expected = 0.75 * pa + 0.25 * pb
+        for got, want in zip(weighted, expected.tolist()):
+            self.assertAlmostEqual(got, want, places=6)
+        equal = app_main.ensemble_five_crop_probabilities(
+            [strong_cotton, strong_polyester], im, 224, mean, std)
+        self.assertNotAlmostEqual(weighted[0], equal[0], places=4)
+
+    def test_app_serves_ensemble_with_four_loaded_members(self):
+        from app import main as app_main
+        self.assertTrue(app_main.ENSEMBLE_ACTIVE)
+        self.assertEqual(len(app_main.ENSEMBLE_MODEL_PATHS), 4)
+        try:
+            import torch  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"torch unavailable: {exc}")
+        models = app_main.load_predict_models()
+        self.assertEqual(len(models), 4)
+        state = app_main.model_status()
+        self.assertTrue(state["ready"], state.get("error"))
+        self.assertTrue(state["ensemble"])
+
+    def test_ensemble_load_failure_falls_back_to_single_model(self):
+        from unittest import mock
+        from app import main as app_main
+        sentinel = object()
+        with mock.patch.object(app_main, "_PREDICT_MODELS", None), \
+             mock.patch.object(app_main, "_load_jit_model", side_effect=RuntimeError("member boom")), \
+             mock.patch.object(app_main, "load_model", return_value=sentinel):
+            self.assertEqual(app_main.load_predict_models(), [sentinel])
+
+    def test_ensemble_math_averages_per_crop_probabilities(self):
+        from app import main as app_main
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable: {exc}")
+        strong_cotton = _FixedLogitsModel([3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        strong_polyester = _FixedLogitsModel([0.0, 3.0, 0.0, 0.0, 0.0, 0.0])
+        im = Image.new("RGB", (300, 300), color=(120, 90, 60))
+        mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+        averaged = app_main.ensemble_five_crop_probabilities(
+            [strong_cotton, strong_polyester], im, 224, mean, std)
+        top = torch.softmax(torch.tensor([3.0, 0.0, 0.0, 0.0, 0.0, 0.0]), dim=0)
+        expected_top = float((top[0] + top[1]) / 2)  # each model tops a different class
+        expected_other = float((top[1] + top[2]) / 2)
+        self.assertAlmostEqual(max(averaged), expected_top, places=6)
+        self.assertAlmostEqual(min(averaged), expected_other, places=6)
+        # The averaged distribution is genuinely diluted: below the 0.55 gate
+        # even though each member alone clears it with room to spare.
+        self.assertLess(max(averaged), 0.55)
+        self.assertGreater(float(top[0]), 0.55)
+        # A one-member ensemble reduces exactly to the single-model function.
+        single = app_main.five_crop_probabilities(strong_cotton, im, 224, mean, std)
+        solo = app_main.ensemble_five_crop_probabilities([strong_cotton], im, 224, mean, std)
+        for got, want in zip(solo, single):
+            self.assertAlmostEqual(got, want, places=7)
+
+    def test_predict_uses_ensemble_average_not_single_model(self):
+        """End to end through /api/predict: two members that each confidently
+        pick a different fabric must average into a gated 'unknown' — either
+        member alone would have been accepted. Fails on the pre-ensemble
+        code, which served a single model and had no load_predict_models.
+        The fixture pins its own equal serving weights: predict reads the
+        module-level ENSEMBLE_MODEL_WEIGHTS of whichever ensemble ships
+        (combo b leads with 0.5, which would un-dilute this two-member
+        fixture), so the averaging contract is tested independent of the
+        shipped combo."""
+        from unittest import mock
+        from app import main as app_main
+        members = [_FixedLogitsModel([3.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                   _FixedLogitsModel([0.0, 3.0, 0.0, 0.0, 0.0, 0.0])]
+        img = Image.new("RGB", (100, 100), color=(128, 128, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        with mock.patch.object(app_main, "load_predict_models", return_value=members), \
+             mock.patch.object(app_main, "ENSEMBLE_MODEL_WEIGHTS", [0.5, 0.5]):
+            res = self.client.post("/api/predict", files={"image": ("sample.jpg", buf.getvalue(), "image/jpeg")})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["fabric"], "unknown")
+        self.assertEqual(data["model_decision"]["inference_method"], "five_crop_ensemble_average")
+        import math
+        p_top = math.exp(3.0) / (math.exp(3.0) + 5.0)
+        p_other = 1.0 / (math.exp(3.0) + 5.0)
+        expected_conf = (p_top + p_other) / 2 * 100
+        self.assertAlmostEqual(data["model_decision"]["top_confidence"], expected_conf, delta=0.5)
 
 
 if __name__ == "__main__":

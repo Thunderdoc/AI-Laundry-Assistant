@@ -382,6 +382,15 @@ _bundled_model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".
 # only. When the parts are present and verify, the assembled v2 model wins
 # over the v1 bundled file; the v1 .pt and its manifest stay untouched, and
 # deleting the parts directory is the rollback.
+# Ensemble (2026-11-05): fabric_ensemble.manifest.json is the ONE place
+# the ensemble is defined — its member list (parts dirs) and weights. When
+# it ships and EVERY member's parts are present and md5-verify,
+# /api/predict serves the manifest-weighted probability average of the
+# member models and the ensemble manifest describes production. Any
+# missing or corrupt member disables ONLY the ensemble — the single-model
+# chain (v2, then v1) keeps serving untouched, so a partial parts landing
+# can never break predict. Changing the ensemble = editing that manifest
+# + shipping the new member's parts; no code change.
 _V2_MODEL_BASENAME = "fabric_mobilenetv2_v2.pt"
 _ASSEMBLED_MANIFEST_PATH = None
 
@@ -392,19 +401,18 @@ def _md5_of_file(path):
             digest.update(chunk)
     return digest.hexdigest()
 
-def assemble_v2_model():
-    """Reassemble the v2 TorchScript model from its base64 parts.
+def _assemble_parts_model(parts_dir_name):
+    """Reassemble one TorchScript model from its md5-verified base64 parts.
 
-    Returns the path of an md5-verified assembled copy, or None when the
-    parts are absent or fail verification — the caller then falls back to
-    the bundled v1 model, whose manifest is derived from its own path, so
-    a corrupt part can never produce a mixed model/manifest pair. Paths
-    derive from _bundled_model_path at call time, like the rest of the
-    model-path resolution.
+    <models_dir>/<parts_dir_name>/parts.json records the assembled file's
+    name, md5 and part count. Returns the path of an md5-verified assembled
+    copy (the models dir, or the temp dir when the models dir is
+    read-only), or None when the parts are absent, incomplete or fail
+    verification. Paths derive from _bundled_model_path at call time, like
+    the rest of the model-path resolution.
     """
-    global _ASSEMBLED_MANIFEST_PATH
     models_dir = os.path.dirname(_bundled_model_path)
-    parts_dir = os.path.join(models_dir, "fabric_v2_parts")
+    parts_dir = os.path.join(models_dir, parts_dir_name)
     info_path = os.path.join(parts_dir, "parts.json")
     if not os.path.isfile(info_path):
         return None
@@ -413,16 +421,16 @@ def assemble_v2_model():
             info = json.load(handle)
         expected_md5 = str(info["md5"]).lower()
         part_count = int(info["parts"])
+        model_basename = str(info["model_file"])
     except Exception:
         return None
     targets = [
-        os.path.join(models_dir, _V2_MODEL_BASENAME),
-        os.path.join(tempfile.gettempdir(), _V2_MODEL_BASENAME),
+        os.path.join(models_dir, model_basename),
+        os.path.join(tempfile.gettempdir(), model_basename),
     ]
     for target in targets:
         try:
             if os.path.isfile(target) and _md5_of_file(target) == expected_md5:
-                _ASSEMBLED_MANIFEST_PATH = os.path.join(models_dir, "fabric_mobilenetv2_v2.manifest.json")
                 return target
         except OSError:
             continue
@@ -442,12 +450,27 @@ def assemble_v2_model():
             with open(staging, "wb") as handle:
                 handle.write(raw)
             os.replace(staging, target)
-            _ASSEMBLED_MANIFEST_PATH = os.path.join(models_dir, "fabric_mobilenetv2_v2.manifest.json")
-            print(f"LaundryAI v2 model assembled from parts -> {target}")
+            print(f"LaundryAI model assembled from {parts_dir_name} parts -> {target}")
             return target
         except OSError:
             continue
     return None
+
+def assemble_v2_model():
+    """Reassemble the v2 TorchScript model from its base64 parts.
+
+    Returns the path of an md5-verified assembled copy, or None when the
+    parts are absent or fail verification — the caller then falls back to
+    the bundled v1 model, whose manifest is derived from its own path, so
+    a corrupt part can never produce a mixed model/manifest pair. Paths
+    derive from _bundled_model_path at call time, like the rest of the
+    model-path resolution.
+    """
+    global _ASSEMBLED_MANIFEST_PATH
+    path = _assemble_parts_model("fabric_v2_parts")
+    if path is not None:
+        _ASSEMBLED_MANIFEST_PATH = os.path.join(os.path.dirname(_bundled_model_path), "fabric_mobilenetv2_v2.manifest.json")
+    return path
 
 def resolve_model_path() -> str:
     configured = os.getenv("MODEL_PATH", "").strip()
@@ -469,8 +492,83 @@ def resolve_model_path() -> str:
     return candidates[0] if candidates else _bundled_model_path
 
 MODEL_PATH=resolve_model_path()
+
+_ENSEMBLE_MANIFEST_BASENAME = "fabric_ensemble.manifest.json"
+
+def _ensemble_config():
+    """The ensemble definition, read from the ensemble manifest — the ONE
+    place the member list and its weights live. Returns a list of
+    (parts_dir, weight) pairs in manifest order, or None when the
+    manifest is missing or malformed (no members, a member without a
+    parts dir, or a weight that is not a positive number). Shipping a
+    different ensemble is a manifest + parts change, never a code change.
+    """
+    models_dir = os.path.dirname(_bundled_model_path)
+    manifest_file = os.path.join(models_dir, _ENSEMBLE_MANIFEST_BASENAME)
+    if not os.path.isfile(manifest_file):
+        return None
+    try:
+        with open(manifest_file, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        members = manifest["ensemble"]["members"]
+        config = []
+        for member in members:
+            parts_dir = str(member["parts_dir"])
+            weight = float(member["weight"])
+            if not parts_dir or weight <= 0:
+                return None
+            config.append((parts_dir, weight))
+        return config or None
+    except Exception:
+        return None
+
+def resolve_ensemble():
+    """(member paths, weights) for the ensemble, or None when it must not
+    serve. The ensemble activates ONLY when the ensemble manifest ships
+    with a valid member config and every member's parts assemble and
+    md5-verify. Any gap returns None and the single-model chain
+    (assembled v2 exp-3, then bundled v1) keeps serving. An explicit
+    MODEL_PATH disables the ensemble: operator choice stays
+    authoritative, exactly as it already overrides the v2 assembly.
+    """
+    if os.getenv("MODEL_PATH", "").strip():
+        return None
+    config = _ensemble_config()
+    if config is None:
+        return None
+    paths = []
+    weights = []
+    for parts_dir_name, weight in config:
+        path = _assemble_parts_model(parts_dir_name)
+        if path is None:
+            return None
+        paths.append(path)
+        weights.append(weight)
+    return paths, weights
+
+def resolve_ensemble_model_paths():
+    """Member paths of the ensemble, or None (see resolve_ensemble)."""
+    resolved = resolve_ensemble()
+    return resolved[0] if resolved is not None else None
+
+_ENSEMBLE_RESOLUTION = resolve_ensemble()
+ENSEMBLE_MODEL_PATHS = _ENSEMBLE_RESOLUTION[0] if _ENSEMBLE_RESOLUTION is not None else None
+ENSEMBLE_MODEL_WEIGHTS = _ENSEMBLE_RESOLUTION[1] if _ENSEMBLE_RESOLUTION is not None else None
+ENSEMBLE_ACTIVE = _ENSEMBLE_RESOLUTION is not None
 _MODEL = None
 _MODEL_ERROR = None
+
+def _load_jit_model(path):
+    """Load one TorchScript model and prove its output width matches the
+    manifest classes before it is allowed to serve."""
+    import torch
+    torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
+    model=torch.jit.load(path, map_location="cpu").eval()
+    input_size, _, _ = preprocess_config()
+    with torch.no_grad(): output=model(torch.zeros(1,3,input_size,input_size))
+    if output.ndim != 2 or output.shape[1] != len(model_labels()):
+        raise RuntimeError("Model output does not match the manifest classes.")
+    return model
 
 def load_model():
     global _MODEL, _MODEL_ERROR
@@ -479,13 +577,7 @@ def load_model():
         _MODEL_ERROR = f"Model file not found at {MODEL_PATH}"
         raise RuntimeError(_MODEL_ERROR)
     try:
-        import torch
-        torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
-        model=torch.jit.load(MODEL_PATH, map_location="cpu").eval()
-        input_size, _, _ = preprocess_config()
-        with torch.no_grad(): output=model(torch.zeros(1,3,input_size,input_size))
-        if output.ndim != 2 or output.shape[1] != len(model_labels()):
-            raise RuntimeError("Model output does not match the manifest classes.")
+        model=_load_jit_model(MODEL_PATH)
         _MODEL, _MODEL_ERROR = model, None
         print(f"LaundryAI model loaded from {MODEL_PATH}")
         return model
@@ -493,14 +585,42 @@ def load_model():
         _MODEL_ERROR = str(exc)
         raise
 
+_PREDICT_MODELS = None
+
+def load_predict_models():
+    """The models /api/predict serves: the ensemble members when the
+    ensemble is active, otherwise the single resolved model. Loaded once
+    and cached — never per request. If a member fails to load even though
+    its parts md5-verified, fall back to the single model instead of
+    failing predict: the fallback chain is the serving contract."""
+    global _PREDICT_MODELS
+    if _PREDICT_MODELS is not None:
+        return _PREDICT_MODELS
+    if ENSEMBLE_ACTIVE:
+        try:
+            models=[_load_jit_model(path) for path in ENSEMBLE_MODEL_PATHS]
+            _PREDICT_MODELS = models
+            print(f"LaundryAI ensemble serving: {[os.path.basename(p) for p in ENSEMBLE_MODEL_PATHS]}")
+            return models
+        except Exception as exc:
+            print(f"LaundryAI ensemble failed to load ({exc}); falling back to the single model")
+    _PREDICT_MODELS = [load_model()]
+    return _PREDICT_MODELS
+
 def model_status():
     try:
-        load_model()
-        return {"ready": True, "error": None, "path": os.path.basename(MODEL_PATH)}
+        load_predict_models()
+        return {"ready": True, "error": None, "path": os.path.basename(MODEL_PATH), "ensemble": ENSEMBLE_ACTIVE}
     except Exception:
-        return {"ready": False, "error": _MODEL_ERROR or "Model validation failed.", "path": os.path.basename(MODEL_PATH)}
+        return {"ready": False, "error": _MODEL_ERROR or "Model validation failed.", "path": os.path.basename(MODEL_PATH), "ensemble": ENSEMBLE_ACTIVE}
 
 def manifest_path():
+    # While the ensemble serves, its manifest is the one that describes
+    # production: reported metrics must describe the serving model, never
+    # a fallback. It carries the same classes/gates/preprocessing values
+    # as the v2 manifest, so thresholds and preprocessing are unchanged.
+    if ENSEMBLE_ACTIVE:
+        return os.path.join(os.path.dirname(_bundled_model_path), _ENSEMBLE_MANIFEST_BASENAME)
     derived = os.path.splitext(MODEL_PATH)[0] + ".manifest.json"
     # An assembled v2 model cached outside the models dir (e.g. /tmp when the
     # repo tree is read-only) has no manifest beside it; use the v2 manifest
@@ -618,15 +738,10 @@ def laplacian_variance(im):
 BLURRY_THRESHOLD = 50.0
 
 
-def five_crop_probabilities(model, im, input_size, mean, std):
-    """Average softmax probabilities over five crops (corners + centre).
-
-    A single stretched 224x224 resize throws away texture detail and makes the
-    answer depend on where the fabric sits in the frame — the main reason phone
-    photos scored worse than the lab test set. Five crops of the same image
-    average that framing noise out. The crop size matches the model's training
-    input size; images smaller than one crop fall back to a single resize.
-    """
+def _five_crop_batch(im, input_size, mean, std):
+    """The normalised tensor batch the five-crop path feeds the model(s):
+    corners + centre crops at the model's training input size; images
+    smaller than one crop fall back to a single resize."""
     import torch, numpy as np
     scale = max(input_size, int(round(input_size * 1.14)))
     width, height = im.size
@@ -652,10 +767,49 @@ def five_crop_probabilities(model, im, input_size, mean, std):
         pixels = np.asarray(crop, dtype=np.float32) / 255.0
         tensors.append(torch.from_numpy(pixels).permute(2, 0, 1))
     batch = torch.stack(tensors)
-    batch = (batch - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(1, 3, 1, 1)
+    return (batch - torch.tensor(mean).view(1, 3, 1, 1)) / torch.tensor(std).view(1, 3, 1, 1)
+
+def five_crop_probabilities(model, im, input_size, mean, std):
+    """Average softmax probabilities over five crops (corners + centre).
+
+    A single stretched 224x224 resize throws away texture detail and makes the
+    answer depend on where the fabric sits in the frame — the main reason phone
+    photos scored worse than the lab test set. Five crops of the same image
+    average that framing noise out. The crop size matches the model's training
+    input size; images smaller than one crop fall back to a single resize.
+    """
+    import torch
+    batch = _five_crop_batch(im, input_size, mean, std)
     with torch.no_grad():
         probs = torch.softmax(model(batch), dim=1)
     return probs.mean(dim=0).tolist()
+
+def ensemble_five_crop_probabilities(models, im, input_size, mean, std, weights=None):
+    """Ensemble inference over the five-crop batch.
+
+    Each member's softmax probabilities are averaged PER CROP first
+    (weighted by the ensemble manifest's member weights, normalised by
+    the weights of the members actually serving; equal weights when none
+    are given), then averaged over the crops — the exact order
+    backend/scripts/evaluate.py applies to a single model, extended
+    across members, and the order the offline ensemble probe used to
+    measure the shipped ensemble figures. The caller's decision gates
+    apply to these averaged probabilities, unchanged. With a single
+    member this reduces exactly to five_crop_probabilities.
+    """
+    import torch
+    batch = _five_crop_batch(im, input_size, mean, std)
+    if weights is None:
+        weights = [1.0] * len(models)
+    pairs = list(zip(models, weights))
+    total = float(sum(weight for _, weight in pairs))
+    with torch.no_grad():
+        averaged = None
+        for model, weight in pairs:
+            probs = torch.softmax(model(batch), dim=1) * weight
+            averaged = probs if averaged is None else averaged + probs
+        averaged = averaged / total
+    return averaged.mean(dim=0).tolist()
 
 def _save_locally(owner_uid, record, normalized_bytes, image_token):
     """Insert a prediction into local SQLite (device-local history).
@@ -748,9 +902,10 @@ def _predict_from_bytes(request: Request, data: bytes, note: Optional[str]):
     quality={"width":im.width,"height":im.height,"brightness":round(sum(sample.mean)/3,1),"texture":texture,"warning": im.width<224 or im.height<224,"blur_score":blur_score,"blurry":blurry,"blur_warning":"Photo looks blurry or shaky — retake with a steady hand for a more reliable result." if blurry else None}
     names=model_labels(); preview=False
     try:
-        model=load_model()
+        models=load_predict_models()
         input_size, mean, std=preprocess_config()
-        probabilities=five_crop_probabilities(model, im, input_size, mean, std)
+        probabilities=ensemble_five_crop_probabilities(models, im, input_size, mean, std,
+                                                       weights=ENSEMBLE_MODEL_WEIGHTS if len(models)>1 else None)
         if len(probabilities)!=len(names): raise ValueError("Model output does not match configured labels")
         probabilities=list(probabilities)
     except HTTPException:
@@ -781,7 +936,7 @@ def _predict_from_bytes(request: Request, data: bytes, note: Optional[str]):
         "recommendation":recommendation(fabric) if accepted_fabric else None,
         "preview":preview,
         "model_decision":{
-            "inference_method":"five_crop_average",
+            "inference_method":"five_crop_ensemble_average" if len(models)>1 else "five_crop_average",
             "accepted":accepted_fabric,
             "detected_non_fabric":detected_non_fabric,
             "reason":decision_reason,

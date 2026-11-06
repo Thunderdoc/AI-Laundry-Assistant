@@ -1,0 +1,233 @@
+{
+  "architecture": "EfficientNet-B0 + MobileNetV2 ensemble (4 TorchScript models, weighted probability averaging)",
+  "classes": [
+    "cotton",
+    "polyester",
+    "denim",
+    "wool",
+    "silk",
+    "non_fabric"
+  ],
+  "confusion_matrix": {
+    "classes": [
+      "cotton",
+      "polyester",
+      "denim",
+      "wool",
+      "silk",
+      "non_fabric"
+    ],
+    "macro_f1": 0.835,
+    "matrix": [
+      [
+        47,
+        3,
+        5,
+        3,
+        2,
+        0
+      ],
+      [
+        7,
+        40,
+        0,
+        3,
+        5,
+        1
+      ],
+      [
+        3,
+        1,
+        56,
+        0,
+        0,
+        0
+      ],
+      [
+        2,
+        1,
+        3,
+        50,
+        0,
+        2
+      ],
+      [
+        0,
+        4,
+        0,
+        1,
+        37,
+        1
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "per_class_metrics": {
+      "cotton": {
+        "precision": 0.7966,
+        "recall": 0.7833,
+        "f1_score": 0.7899,
+        "support": 60
+      },
+      "polyester": {
+        "precision": 0.8163,
+        "recall": 0.7143,
+        "f1_score": 0.7619,
+        "support": 56
+      },
+      "denim": {
+        "precision": 0.875,
+        "recall": 0.9333,
+        "f1_score": 0.9032,
+        "support": 60
+      },
+      "wool": {
+        "precision": 0.8772,
+        "recall": 0.8621,
+        "f1_score": 0.8696,
+        "support": 58
+      },
+      "silk": {
+        "precision": 0.8409,
+        "recall": 0.8605,
+        "f1_score": 0.8506,
+        "support": 43
+      },
+      "non_fabric": {
+        "precision": 0.0,
+        "recall": null,
+        "f1_score": null,
+        "support": 0
+      }
+    }
+  },
+  "ensemble": {
+    "aggregation": "softmax probabilities averaged across members per crop, then averaged over the five crops \u2014 the same order backend/scripts/evaluate.py uses for a single model, applied to the averaged probabilities; decision gates unchanged",
+    "fallback": "ensemble incomplete or corrupt -> exp-3 single model (fabric_v2_parts) -> bundled v1 model; a partial parts landing never activates the ensemble",
+    "members": [
+      {
+        "md5": "c90cbd679723e9a5dec8b5bfe8228e1a",
+        "model_file": "fabric_ens_exp12.pt",
+        "name": "exp12",
+        "parts_dir": "fabric_ens_exp12_parts",
+        "realphoto_accuracy": 0.6628,
+        "test_accuracy": 0.8051,
+        "weight": 0.5
+      },
+      {
+        "md5": "7b89bbe4f32b722c4c4c982e3883f6f1",
+        "model_file": "fabric_mobilenetv2_v2.pt",
+        "name": "exp3",
+        "parts_dir": "fabric_v2_parts",
+        "realphoto_accuracy": 0.5867,
+        "test_accuracy": 0.8087,
+        "weight": 0.16666666666666666
+      },
+      {
+        "md5": "c1bea9a1c28cb1a2ab83d29243f78a7c",
+        "model_file": "fabric_ens_exp6.pt",
+        "name": "exp6",
+        "parts_dir": "fabric_ens_exp6_parts",
+        "realphoto_accuracy": 0.5965,
+        "test_accuracy": 0.787,
+        "weight": 0.16666666666666666
+      },
+      {
+        "md5": "ddd14c72afc735cc487269a920fed7f4",
+        "model_file": "fabric_ens_exp2.pt",
+        "name": "exp2",
+        "parts_dir": "fabric_ens_exp2_parts",
+        "realphoto_accuracy": 0.5906,
+        "test_accuracy": 0.7798,
+        "weight": 0.16666666666666666
+      }
+    ],
+    "weights": "weighted \u2014 exp12 0.5, exp3/exp6/exp2 1/6 each (ensemble probe v7 combo 'b') \u2014 per-member numeric weights below are the serving config"
+  },
+  "evaluation": {
+    "accepted_accuracy_at_gates": 0.9608,
+    "evaluated_at": "2026-11-05",
+    "exclusions": "non_fabric has no held-out images: its 5 val + 5 test images were byte-identical copies of train images and are denylisted in data/quarantine_leaked/non_fabric/LEAKED_FILES.txt (excluded by train.py and evaluate.py). Its metrics are null (unmeasured), not zero.",
+    "gates": {
+      "min_confidence": 0.55,
+      "min_margin": 0.1
+    },
+    "method": "five-crop inference identical to backend/scripts/evaluate.py (EXIF transpose, leaked-file denylist, top-1 with no decision-gate filtering for accuracy), computed by the offline ensemble probe from per-crop softmax caches; all single-model control values (including exp12's 0.8051 / 0.6628 / 0.6335) reproduced the previously recorded numbers exactly before any ensemble figure was taken",
+    "provenance": "Members: exp12 stage-1 distilled student (Kaggle laundry-v4-exp12-distill \u2014 a single EfficientNet-B0 distilled from the combo-e ensemble; highest real-photo score of any single model), exp3 chunk2_best (Kaggle laundry-v4-exp3-cleanheavy, previously live as the single model), exp6 chunk1_final (Kaggle laundry-v4-exp6-v5-ladder), exp2 stage B final (Kaggle laundry-v4-exp2-twostage). Combo 'b' of ensemble probe v7: exp12 x0.5 + (exp3+exp6+exp2) x0.5. It beat the previous ensemble (combo e) on all three sets (clean 0.8303 vs 0.8267, real-photo 0.6569 vs 0.6452, dim 0.6296 vs 0.6218). Shipped 2026-11-05 on the owner's explicit approval. No val-split ensemble figure is claimed: the probe cached test/real-photo probabilities only, so val fields are omitted rather than estimated.",
+    "realphoto_test": {
+      "accuracy": 0.6569,
+      "images": 513,
+      "note": "Held-out whole-garment product photos (TextileNet), never trained on. The exp-3 single model scores 0.5867 on this set; this ensemble scores 0.6569."
+    },
+    "realphoto_test_dim": {
+      "accuracy": 0.6296,
+      "images": 513,
+      "note": "Dimmed copies of the realphoto_test images. The exp-3 single model scores 0.5419 on this set; this ensemble scores 0.6296."
+    },
+    "script": "ensemble probe v7 over backend/scripts/evaluate.py semantics --data data/test (gate set, 277 images after denylist), realphoto_test, realphoto_test_dim",
+    "unknown_rate_at_gates": 0.2635
+  },
+  "input_size": 224,
+  "macro_f1": 0.835,
+  "min_confidence": 0.55,
+  "min_margin": 0.1,
+  "model_version": "ensemble-b-20261105",
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "per_class_metrics": {
+    "cotton": {
+      "precision": 0.7966,
+      "recall": 0.7833,
+      "f1_score": 0.7899,
+      "support": 60
+    },
+    "polyester": {
+      "precision": 0.8163,
+      "recall": 0.7143,
+      "f1_score": 0.7619,
+      "support": 56
+    },
+    "denim": {
+      "precision": 0.875,
+      "recall": 0.9333,
+      "f1_score": 0.9032,
+      "support": 60
+    },
+    "wool": {
+      "precision": 0.8772,
+      "recall": 0.8621,
+      "f1_score": 0.8696,
+      "support": 58
+    },
+    "silk": {
+      "precision": 0.8409,
+      "recall": 0.8605,
+      "f1_score": 0.8506,
+      "support": 43
+    },
+    "non_fabric": {
+      "precision": 0.0,
+      "recall": null,
+      "f1_score": null,
+      "support": 0
+    }
+  },
+  "test_accuracy": 0.8303,
+  "test_images": 277
+}
