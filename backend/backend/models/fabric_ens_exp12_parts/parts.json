@@ -1,0 +1,8 @@
+{
+  "model_file": "fabric_ens_exp12.pt",
+  "source": "exp12 distilled student, stage-1 final (Kaggle laundry-v4-exp12-distill), ensemble member 1 of 4, weight 0.5",
+  "md5": "c90cbd679723e9a5dec8b5bfe8228e1a",
+  "bytes": 16549314,
+  "parts": 23,
+  "part_encoding": "base64, concatenated in filename order, no separators"
+}
