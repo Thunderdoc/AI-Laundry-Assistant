@@ -1,0 +1,8 @@
+{
+ "model_file": "fabric_ens_exp14.pt",
+ "source": "exp14 stage1_best (Kaggle laundry-v4-exp14-b2-distill: EfficientNet-B2 student distilled from the combo-b ensemble), ensemble member 1 of 5, weight 0.4",
+ "md5": "6b19be35e2b221215425ae89c66fb58f",
+ "bytes": 31500912,
+ "parts": 43,
+ "part_encoding": "base64, concatenated in filename order, no separators"
+}
