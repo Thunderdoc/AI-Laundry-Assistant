@@ -1190,8 +1190,8 @@ class TestV2ModelParts(unittest.TestCase):
         from app import main as app_main
         self.assertTrue(app_main.MODEL_PATH.endswith("fabric_mobilenetv2_v2.pt"), app_main.MODEL_PATH)
         manifest = app_main.load_manifest()
-        self.assertEqual(manifest.get("model_version"), "ensemble-b-20261105")
-        self.assertEqual(manifest.get("test_accuracy"), 0.8303)
+        self.assertEqual(manifest.get("model_version"), "ensemble-f-20261107")
+        self.assertEqual(manifest.get("test_accuracy"), 0.8448)
         self.assertEqual(manifest.get("min_confidence"), 0.55)
         self.assertEqual(manifest.get("min_margin"), 0.10)
         models_dir = os.path.dirname(app_main._bundled_model_path)
@@ -1214,10 +1214,11 @@ class _FixedLogitsModel:
 
 
 class TestEnsembleModelShip(unittest.TestCase):
-    """The 2026-11-05 ensemble ship (combo b): /api/predict serves the
-    weighted probability average of exp-12 (distilled EffNet-B0, weight
-    0.5) + exp-3 + exp-6 + exp-2 (1/6 each) — measured clean 0.8303 /
-    real-photo 0.6569 / dim 0.6296. Pin the whole contract: every member's
+    """The 2026-11-07 ensemble ship (combo f): /api/predict serves the
+    weighted probability average of exp-14 (distilled EffNet-B2, weight
+    0.4) + exp-12 (distilled EffNet-B0, weight 0.2) + exp-3 + exp-6 +
+    exp-2 (2/15 each) — measured clean 0.8448 / real-photo 0.6745 /
+    dim 0.6472. Pin the whole contract: every member's
     parts assemble md5-verified, a partial or corrupt member disables ONLY
     the ensemble (single-model chain keeps serving), and predict really
     averages the members' probabilities before the unchanged gates."""
@@ -1284,10 +1285,11 @@ class TestEnsembleModelShip(unittest.TestCase):
                 count = int(infos[parts_dir_name]["parts"]) - (1 if skip_last else 0)
                 for index in range(count):
                     shutil.copy(os.path.join(src_parts, f"part-{index:03d}.txt"), fake_parts)
-            # v2 + exp2 + exp12 complete; exp6 incomplete (first part only).
+            # v2 + exp2 + exp12 + exp14 complete; exp6 incomplete (first part only).
             copy_parts("fabric_v2_parts")
             copy_parts("fabric_ens_exp2_parts")
             copy_parts("fabric_ens_exp12_parts")
+            copy_parts("fabric_ens_exp14_parts")
             shutil.copy(os.path.join(models_dir, "fabric_ens_exp6_parts", "part-000.txt"),
                         os.path.join(fake_models, "fabric_ens_exp6_parts"))
             with mock.patch.dict(os.environ, env, clear=True), \
@@ -1304,11 +1306,11 @@ class TestEnsembleModelShip(unittest.TestCase):
                 with open(last, "w", encoding="utf-8") as handle:
                     handle.write(flipped)
                 self.assertIsNone(app_main.resolve_ensemble_model_paths())
-                # Clean complete set: the ensemble resolves all four members.
+                # Clean complete set: the ensemble resolves all five members.
                 shutil.copy(os.path.join(models_dir, "fabric_ens_exp6_parts", os.path.basename(last)), last)
                 paths = app_main.resolve_ensemble_model_paths()
                 self.assertIsNotNone(paths)
-                self.assertEqual(len(paths), 4)
+                self.assertEqual(len(paths), 5)
 
     def test_ensemble_definition_is_config_driven_from_manifest(self):
         """The member list + weights live ONLY in fabric_ensemble.manifest
@@ -1320,10 +1322,10 @@ class TestEnsembleModelShip(unittest.TestCase):
             manifest = json.load(handle)
         declared = [(m["parts_dir"], float(m["weight"])) for m in manifest["ensemble"]["members"]]
         self.assertEqual(app_main._ensemble_config(), declared)
-        self.assertEqual(len(declared), 4)
+        self.assertEqual(len(declared), 5)
         self.assertAlmostEqual(sum(w for _, w in declared), 1.0, places=9)
         self.assertEqual([os.path.basename(p) for p in app_main.ENSEMBLE_MODEL_PATHS],
-                         ["fabric_ens_exp12.pt", "fabric_mobilenetv2_v2.pt", "fabric_ens_exp6.pt", "fabric_ens_exp2.pt"])
+                         ["fabric_ens_exp14.pt", "fabric_ens_exp12.pt", "fabric_mobilenetv2_v2.pt", "fabric_ens_exp6.pt", "fabric_ens_exp2.pt"])
         self.assertEqual(app_main.ENSEMBLE_MODEL_WEIGHTS, [w for _, w in declared])
 
     def test_ensemble_math_honours_manifest_weights(self):
@@ -1351,16 +1353,16 @@ class TestEnsembleModelShip(unittest.TestCase):
             [strong_cotton, strong_polyester], im, 224, mean, std)
         self.assertNotAlmostEqual(weighted[0], equal[0], places=4)
 
-    def test_app_serves_ensemble_with_four_loaded_members(self):
+    def test_app_serves_ensemble_with_five_loaded_members(self):
         from app import main as app_main
         self.assertTrue(app_main.ENSEMBLE_ACTIVE)
-        self.assertEqual(len(app_main.ENSEMBLE_MODEL_PATHS), 4)
+        self.assertEqual(len(app_main.ENSEMBLE_MODEL_PATHS), 5)
         try:
             import torch  # noqa: F401
         except Exception as exc:
             self.skipTest(f"torch unavailable: {exc}")
         models = app_main.load_predict_models()
-        self.assertEqual(len(models), 4)
+        self.assertEqual(len(models), 5)
         state = app_main.model_status()
         self.assertTrue(state["ready"], state.get("error"))
         self.assertTrue(state["ensemble"])
@@ -1408,7 +1410,7 @@ class TestEnsembleModelShip(unittest.TestCase):
         code, which served a single model and had no load_predict_models.
         The fixture pins its own equal serving weights: predict reads the
         module-level ENSEMBLE_MODEL_WEIGHTS of whichever ensemble ships
-        (combo b leads with 0.5, which would un-dilute this two-member
+        (combo f leads with 0.4, which would un-dilute this two-member
         fixture), so the averaging contract is tested independent of the
         shipped combo."""
         from unittest import mock

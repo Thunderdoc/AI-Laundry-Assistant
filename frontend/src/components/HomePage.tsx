@@ -55,12 +55,18 @@ const DEMO_SCAN = [
  * (fabric_ensemble.manifest.json: test_accuracy 0.8303, macro_f1 0.8350,
  * test_images 277; real-photo 0.6569 vs exp3's 0.5867) — the figures below
  * are the ensemble manifest's own, exactly as it declares.
+ * Updated 2026-11-07 (combo f): the ensemble is now 5 models — the exp14
+ * distilled EffNet-B2 at weight 0.4, the exp12 distilled EffNet-B0 at 0.2,
+ * plus exp3/exp6/exp2 at 2/15 each
+ * (fabric_ensemble.manifest.json: test_accuracy 0.8448, macro_f1 0.8434,
+ * test_images 277; real-photo 0.6745 vs exp3's 0.5867) — the figures below
+ * are the ensemble manifest's own, exactly as it declares.
  */
 const LANDING_STATS: { value: number; decimals: number; suffix: string; label: string }[] = [
   { value: 6, decimals: 0, suffix: "", label: "Fabric classes (+ non-fabric rejection)" },
   { value: 6848, decimals: 0, suffix: "", label: "Training images" },
   { value: 277, decimals: 0, suffix: "", label: "Held-out test images" },
-  { value: 83.03, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
+  { value: 84.48, decimals: 2, suffix: "%", label: "Test accuracy (artifact-declared)" },
   { value: 0.84, decimals: 2, suffix: "", label: "Macro F1 (artifact-declared)" },
   { value: 4, decimals: 0, suffix: "", label: "UI languages · °C/°F anywhere" },
 ];
