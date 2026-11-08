@@ -1,5 +1,5 @@
 {
-  "architecture": "EfficientNet-B2 + EfficientNet-B0 + MobileNetV2 ensemble (5 TorchScript models, weighted probability averaging)",
+  "architecture": "EfficientNet-B2 + EfficientNet-B0 + MobileNetV2 ensemble (6 TorchScript models, weighted probability averaging)",
   "classes": [
     "cotton",
     "polyester",
@@ -17,14 +17,14 @@
       "silk",
       "non_fabric"
     ],
-    "macro_f1": 0.8434,
+    "macro_f1": 0.8473,
     "matrix": [
       [
         46,
-        4,
         5,
-        2,
-        2,
+        6,
+        1,
+        1,
         1
       ],
       [
@@ -44,10 +44,10 @@
         0
       ],
       [
-        2,
+        1,
         0,
         3,
-        53,
+        54,
         0,
         0
       ],
@@ -70,14 +70,14 @@
     ],
     "per_class_metrics": {
       "cotton": {
-        "f1_score": 0.8,
-        "precision": 0.8364,
+        "f1_score": 0.807,
+        "precision": 0.8519,
         "recall": 0.7667,
         "support": 60
       },
       "denim": {
-        "f1_score": 0.9134,
-        "precision": 0.8657,
+        "f1_score": 0.9062,
+        "precision": 0.8529,
         "recall": 0.9667,
         "support": 60
       },
@@ -88,21 +88,21 @@
         "support": 0
       },
       "polyester": {
-        "f1_score": 0.7547,
-        "precision": 0.8,
+        "f1_score": 0.7477,
+        "precision": 0.7843,
         "recall": 0.7143,
         "support": 56
       },
       "silk": {
-        "f1_score": 0.8506,
-        "precision": 0.8409,
+        "f1_score": 0.8605,
+        "precision": 0.8605,
         "recall": 0.8605,
         "support": 43
       },
       "wool": {
-        "f1_score": 0.8983,
-        "precision": 0.8833,
-        "recall": 0.9138,
+        "f1_score": 0.9153,
+        "precision": 0.9,
+        "recall": 0.931,
         "support": 58
       }
     }
@@ -112,13 +112,22 @@
     "fallback": "ensemble incomplete or corrupt -> exp-3 single model (fabric_v2_parts) -> bundled v1 model; a partial parts landing never activates the ensemble",
     "members": [
       {
+        "md5": "4c65f9cf817999d04ad1878846718596",
+        "model_file": "fabric_ens_exp15.pt",
+        "name": "exp15",
+        "parts_dir": "fabric_ens_exp15_parts",
+        "realphoto_accuracy": 0.6706,
+        "test_accuracy": 0.8123,
+        "weight": 0.2
+      },
+      {
         "md5": "6b19be35e2b221215425ae89c66fb58f",
         "model_file": "fabric_ens_exp14.pt",
         "name": "exp14",
         "parts_dir": "fabric_ens_exp14_parts",
         "realphoto_accuracy": 0.6589,
         "test_accuracy": 0.8267,
-        "weight": 0.4
+        "weight": 0.32
       },
       {
         "md5": "c90cbd679723e9a5dec8b5bfe8228e1a",
@@ -127,7 +136,7 @@
         "parts_dir": "fabric_ens_exp12_parts",
         "realphoto_accuracy": 0.6628,
         "test_accuracy": 0.8051,
-        "weight": 0.2
+        "weight": 0.16
       },
       {
         "md5": "7b89bbe4f32b722c4c4c982e3883f6f1",
@@ -136,7 +145,7 @@
         "parts_dir": "fabric_v2_parts",
         "realphoto_accuracy": 0.5867,
         "test_accuracy": 0.8087,
-        "weight": 0.13333333333333333
+        "weight": 0.10666666666666667
       },
       {
         "md5": "c1bea9a1c28cb1a2ab83d29243f78a7c",
@@ -145,7 +154,7 @@
         "parts_dir": "fabric_ens_exp6_parts",
         "realphoto_accuracy": 0.5965,
         "test_accuracy": 0.787,
-        "weight": 0.13333333333333333
+        "weight": 0.10666666666666667
       },
       {
         "md5": "ddd14c72afc735cc487269a920fed7f4",
@@ -154,39 +163,39 @@
         "parts_dir": "fabric_ens_exp2_parts",
         "realphoto_accuracy": 0.5906,
         "test_accuracy": 0.7798,
-        "weight": 0.13333333333333333
+        "weight": 0.10666666666666667
       }
     ],
-    "weights": "weighted \u2014 exp14 0.4, exp12 0.2, exp3/exp6/exp2 2/15 each (ensemble probe v8 combo 'f') \u2014 per-member numeric weights below are the serving config"
+    "weights": "weighted \u2014 exp15 0.2, exp14 0.32, exp12 0.16, exp3/exp6/exp2 0.8\u00d72/15 each (ensemble probe v9 combo 'e': exp15 \u00d70.2 + combo f \u00d70.8) \u2014 per-member numeric weights below are the serving config"
   },
   "evaluation": {
-    "accepted_accuracy_at_gates": 0.9395,
-    "evaluated_at": "2026-11-07",
+    "accepted_accuracy_at_gates": 0.9266,
+    "evaluated_at": "2026-11-08",
     "exclusions": "non_fabric has no held-out images: its 5 val + 5 test images were byte-identical copies of train images and are denylisted in data/quarantine_leaked/non_fabric/LEAKED_FILES.txt (excluded by train.py and evaluate.py). Its metrics are null (unmeasured), not zero.",
     "gates": {
       "min_confidence": 0.55,
       "min_margin": 0.1
     },
-    "method": "five-crop inference identical to backend/scripts/evaluate.py (EXIF transpose, leaked-file denylist, top-1 with no decision-gate filtering for accuracy), computed by the offline ensemble probe from per-crop softmax caches; all single-model control values (including exp14's 0.8267 / 0.6589 / 0.6277 and exp12's 0.8051 / 0.6628 / 0.6335) reproduced the previously recorded numbers exactly before any ensemble figure was taken",
-    "provenance": "Members: exp14 stage1_best (Kaggle laundry-v4-exp14-b2-distill \u2014 a single EfficientNet-B2 distilled from the combo-b ensemble), exp12 stage-1 distilled student (Kaggle laundry-v4-exp12-distill \u2014 a single EfficientNet-B0 distilled from the combo-e ensemble; highest real-photo score of any single model), exp3 chunk2_best (Kaggle laundry-v4-exp3-cleanheavy, previously live as the single model), exp6 chunk1_final (Kaggle laundry-v4-exp6-v5-ladder), exp2 stage B final (Kaggle laundry-v4-exp2-twostage). Combo 'f' of ensemble probe v8: exp14 x0.4 + exp12 x0.2 + (exp3+exp6+exp2) x0.4. It beat the previous ensemble (combo b) on all three sets (clean 0.8448 vs 0.8303, real-photo 0.6745 vs 0.6569, dim 0.6472 vs 0.6296). Shipped 2026-11-07 on the owner's explicit approval. No val-split ensemble figure is claimed: the probe cached test/real-photo probabilities only, so val fields are omitted rather than estimated.",
+    "method": "five-crop inference identical to backend/scripts/evaluate.py (EXIF transpose, leaked-file denylist, top-1 with no decision-gate filtering for accuracy), computed by the offline ensemble probe from per-crop softmax caches; all single-model control values (including exp15's 0.8123 / 0.6706 / 0.6238, exp14's 0.8267 / 0.6589 / 0.6277 and exp12's 0.8051 / 0.6628 / 0.6335) reproduced the previously recorded numbers exactly before any ensemble figure was taken",
+    "provenance": "Members: exp15 chunk1_final (Kaggle laundry-v4-exp15-b2-distill-enriched \u2014 a single EfficientNet-B2 distilled from the combo-f ensemble, stage A enriched with the S1 staged admixture of 800 verified garment photos; highest real-photo score of any single model), exp14 stage1_best (Kaggle laundry-v4-exp14-b2-distill \u2014 a single EfficientNet-B2 distilled from the combo-b ensemble), exp12 stage-1 distilled student (Kaggle laundry-v4-exp12-distill \u2014 a single EfficientNet-B0 distilled from the combo-e teachers), exp3 chunk2_best (Kaggle laundry-v4-exp3-cleanheavy, previously live as the single model), exp6 chunk1_final (Kaggle laundry-v4-exp6-v5-ladder), exp2 stage B final (Kaggle laundry-v4-exp2-twostage). Combo 'e' of ensemble probe v9: exp15 x0.2 + combo f x0.8. It beat the previous ensemble (combo f) on all three sets (clean 0.8484 vs 0.8448, real-photo 0.6803 vs 0.6745, dim 0.6511 vs 0.6472). Shipped 2026-11-08 on the owner's explicit approval. No val-split ensemble figure is claimed: the probe cached test/real-photo probabilities only, so val fields are omitted rather than estimated.",
     "realphoto_test": {
-      "accuracy": 0.6745,
+      "accuracy": 0.6803,
       "images": 513,
-      "note": "Held-out whole-garment product photos (TextileNet), never trained on. The exp-3 single model scores 0.5867 on this set and the previous ensemble (combo b) 0.6569; this ensemble scores 0.6745."
+      "note": "Held-out whole-garment product photos (TextileNet), never trained on. The exp-3 single model scores 0.5867 on this set and the previous ensemble (combo f) 0.6745; this ensemble scores 0.6803."
     },
     "realphoto_test_dim": {
-      "accuracy": 0.6472,
+      "accuracy": 0.6511,
       "images": 513,
-      "note": "Dimmed copies of the realphoto_test images. The exp-3 single model scores 0.5419 on this set and the previous ensemble (combo b) 0.6296; this ensemble scores 0.6472."
+      "note": "Dimmed copies of the realphoto_test images. The exp-3 single model scores 0.5419 on this set and the previous ensemble (combo f) 0.6472; this ensemble scores 0.6511."
     },
-    "script": "ensemble probe v8 over backend/scripts/evaluate.py semantics --data data/test (gate set, 277 images after denylist), realphoto_test, realphoto_test_dim",
-    "unknown_rate_at_gates": 0.2238
+    "script": "ensemble probe v9 over backend/scripts/evaluate.py semantics --data data/test (gate set, 277 images after denylist), realphoto_test, realphoto_test_dim",
+    "unknown_rate_at_gates": 0.213
   },
   "input_size": 224,
-  "macro_f1": 0.8434,
+  "macro_f1": 0.8473,
   "min_confidence": 0.55,
   "min_margin": 0.1,
-  "model_version": "ensemble-f-20261107",
+  "model_version": "ensemble-g-20261108",
   "normalization": {
     "mean": [
       0.485,
@@ -201,14 +210,14 @@
   },
   "per_class_metrics": {
     "cotton": {
-      "f1_score": 0.8,
-      "precision": 0.8364,
+      "f1_score": 0.807,
+      "precision": 0.8519,
       "recall": 0.7667,
       "support": 60
     },
     "denim": {
-      "f1_score": 0.9134,
-      "precision": 0.8657,
+      "f1_score": 0.9062,
+      "precision": 0.8529,
       "recall": 0.9667,
       "support": 60
     },
@@ -219,24 +228,24 @@
       "support": 0
     },
     "polyester": {
-      "f1_score": 0.7547,
-      "precision": 0.8,
+      "f1_score": 0.7477,
+      "precision": 0.7843,
       "recall": 0.7143,
       "support": 56
     },
     "silk": {
-      "f1_score": 0.8506,
-      "precision": 0.8409,
+      "f1_score": 0.8605,
+      "precision": 0.8605,
       "recall": 0.8605,
       "support": 43
     },
     "wool": {
-      "f1_score": 0.8983,
-      "precision": 0.8833,
-      "recall": 0.9138,
+      "f1_score": 0.9153,
+      "precision": 0.9,
+      "recall": 0.931,
       "support": 58
     }
   },
-  "test_accuracy": 0.8448,
+  "test_accuracy": 0.8484,
   "test_images": 277
 }
