@@ -1,21 +1,22 @@
 # LaundryAI operations
 
 LaundryAI is designed to operate without Codex. Vercel serves the browser app,
-Render serves the FastAPI inference API, Firebase provides authentication and
-durable private storage, and an administrator controls training releases.
+Render serves the FastAPI inference API, Firebase provides authentication,
+Supabase provides durable private storage (Postgres + Storage), and an
+administrator controls training releases.
 
 ## Image and feedback lifecycle
 
 1. A signed-in user uploads an image to `/api/predict`.
-2. The API validates, normalizes, and predicts the image. Firebase Storage saves
-   it under `private-uploads/<uid>/<prediction-id>.jpg`; Realtime Database stores
+2. The API validates, normalizes, and predicts the image. Supabase Storage saves
+   it under `private-uploads/<uid>/<prediction-id>.jpg`; Supabase Postgres stores
    the prediction metadata with the same owner UID.
-3. If the user corrects the result, Firebase copies the image to
+3. If the user corrects the result, Supabase copies the image to
    `feedback-pending/<confirmed-label>/...`. It is not training data yet.
 4. The Admin Review Queue displays pending corrections. Approval copies the
    image to `training-approved/<confirmed-label>/...`; rejection excludes it.
 5. A training job uses the fixed baseline train/validation/test splits plus
-   reviewed additions. The GPU only holds temporary tensors in VRAM; Firebase
+   reviewed additions. The GPU only holds temporary tensors in VRAM; Supabase
    remains the durable source of truth.
 6. Training produces a separate candidate model and manifest. The live model is
    unchanged until the release gates pass and an administrator promotes it.
@@ -45,16 +46,36 @@ Render then deploys the versioned model. Never replace it merely because more
 images exist; require improved test accuracy and macro-F1 with no material
 per-class recall regression.
 
+Ensemble promotion is a manifest + parts change instead: edit
+`backend/backend/models/fabric_ensemble.manifest.json` (member list + weights)
+and ship the new member's md5-verified parts directory; no code change. The
+ensemble activates only when every member's parts are present and verify —
+a partial landing keeps the previous single-model chain serving.
+
 ## Required Render configuration
 
 - `ADMIN_EMAILS`
-- `CORS_ORIGINS`
-- `FIREBASE_DATABASE_URL`
-- `FIREBASE_STORAGE_BUCKET`
+- `CORS_ORIGINS` — `https://ai-laundry-assistant-thunderdoc.vercel.app`
+- `PERSISTENCE_BACKEND=supabase`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_BUCKET`
 - `FIREBASE_SERVICE_ACCOUNT_JSON_B64` (preferred: one-line Base64 of the complete downloaded JSON file)
 - `FIREBASE_SERVICE_ACCOUNT_JSON` (raw JSON alternative; do not configure both)
-- `MODEL_PATH=backend/models/fabric_mobilenetv2.pt`
-- `PYTHON_VERSION=3.13.7`
+- `PYTHON_VERSION=3.11.11`
+
+The Firebase service-account credential is still required: the server uses it
+to verify Firebase ID tokens, even though durable storage is Supabase.
+`FIREBASE_DATABASE_URL` and `FIREBASE_STORAGE_BUCKET` are needed only for the
+legacy Firebase persistence path (`PERSISTENCE_BACKEND=firebase`).
+
+Do **not** set `MODEL_PATH` on the production service: an explicit `MODEL_PATH`
+disables the combo G ensemble and serves a single model instead. With
+`MODEL_PATH` unset, the server loads the tracked ensemble (manifest + verified
+parts under `backend/backend/models/`). The Python version is pinned to
+3.11.11 in `backend/.python-version` and in the `Dockerfile`
+(`python:3.11-slim`); Render's newer Python defaults are incompatible with
+this TorchScript runtime.
 
 For local training through the API also set `ENABLE_RETRAINING=true`. Render's
 free CPU instance should keep this false. For a separate GPU worker use

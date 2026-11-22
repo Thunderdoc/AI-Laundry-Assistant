@@ -1,13 +1,19 @@
 # 🧺 LaundryAI
 
-Experimental AI-powered fabric-care assistant. The system deliberately refuses prediction until a trained, exported MobileNetV2 artifact and its preprocessing/class manifest are supplied. No heuristic fallback is used, so inference failures are surfaced instead of returning fabricated classifications.
+AI-powered fabric-care assistant — live at https://ai-laundry-assistant-thunderdoc.vercel.app. Upload or photograph a garment and the app identifies the fabric (cotton, polyester, denim, wool, silk — or non-fabric) and returns wash/dry/iron care guidance from a documented textile knowledge base. No heuristic fallback is used: low-certainty answers return `unknown` instead of a guessed fabric.
+
+## Live
+
+- **App:** https://ai-laundry-assistant-thunderdoc.vercel.app
+- **API:** https://ai-laundry-assistant.onrender.com/api (`/api/health` reports `model_ready` and persistence status)
+- **Shipped model:** combo G ensemble — `ensemble-g-20261108` (EfficientNet-B2 + EfficientNet-B0 + MobileNetV2, 6 models, weighted probability averaging). Measured: **84.84%** clean test accuracy (277 held-out images), **68.03%** on real phone photos (513 images), **65.11%** in dim light (513 images). Full numbers: `docs/MODEL_CARD.md` and `backend/backend/models/fabric_ensemble.manifest.json`.
 
 ## Run
 
 Windows quick start (double-click):
 
 ```text
-run-laundryai.bat (or run-laundraai.bat)
+run-laundryai.bat
 ```
 
 This opens two command windows (backend + frontend) automatically.
@@ -19,9 +25,11 @@ cd frontend; npm install; npm run dev
 
 Open `http://localhost:5173`; API documentation is at `http://127.0.0.1:8000/docs`.
 
+Python 3.11.11 (see `backend/.python-version`); Node >= 20.19 (see `frontend/package.json`).
+
 ## Architecture
 
-Image validation → trained model (when supplied) → confidence + top-2 margin gate (`unknown` for low certainty) + explicit `non_fabric` class → documented fabric knowledge base → rule-based care and eco recommendations → history/analytics. Production can use Firebase Realtime Database and Firebase Storage through the backend; SQLite/local folders remain the development fallback.
+Image validation → combo G ensemble inference (five-crop average) → confidence + top-2 margin gate (`unknown` for low certainty) + explicit `non_fabric` class → documented fabric knowledge base → rule-based care and eco recommendations → history/analytics. Sign-in is Firebase Auth; durable records live in Supabase (Postgres + Storage). SQLite/local folders remain the development fallback.
 
 ## Features
 
@@ -35,9 +43,13 @@ Image validation → trained model (when supplied) → confidence + top-2 margin
 
 See `docs/IMPROVEMENT_PLAN.md` for the full research report, feature-gap analysis, and phased roadmap (including deliberately deferred model work: care-label OCR, stain detection, push notifications).
 
-Set `PERSISTENCE_BACKEND=firebase` together with the backend `FIREBASE_DATABASE_URL`, storage bucket, and service-account credential to enable durable cloud records. See `docs/18_firebase_persistence_setup.md` before switching it on.
+## Persistence
 
-The current repository contains validated upload handling, a structured five-fabric knowledge base, API contract, responsive analysis interface, and honest model/metrics gates. Add the trained artifact at the configured `MODEL_PATH`, alongside a label-order and preprocessing manifest, before enabling inference.
+The live backend uses Supabase: set `PERSISTENCE_BACKEND=supabase` together with `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_BUCKET`. Firebase Auth stays the sign-in provider either way. The Firebase Realtime Database path (`PERSISTENCE_BACKEND=firebase`) is the legacy alternative — see `docs/18_firebase_persistence_setup.md` before switching it on.
+
+## Shipped model
+
+The trained ensemble ships in this repo — no artifact needs supplying. The serving model is defined by `backend/backend/models/fabric_ensemble.manifest.json` (member parts live beside it in `fabric_ens_*_parts/` and `fabric_v2_parts/`); the server assembles and md5-verifies the members at startup, and falls back to the exp-3 single model, then the bundled v1 MobileNetV2, if any member is missing or corrupt. Do **not** set `MODEL_PATH` in production: an explicit `MODEL_PATH` disables the ensemble and serves a single model instead. `backend/models/` holds only a manifest copy — `.pt` files are git-ignored there, which is why the tracked weights live under `backend/backend/models/`.
 
 ## Train a real model
 

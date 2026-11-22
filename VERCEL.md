@@ -2,6 +2,8 @@
 
 This Vercel configuration deploys the React website. The current ML API should run separately on a persistent container host (AWS App Runner/ECS, Render, Railway, or a VM), because model inference, uploaded images, and SQLite are not suitable for a stateless static Vercel deployment.
 
+The live site is https://ai-laundry-assistant-thunderdoc.vercel.app, served from the `ai-laundry-assistant` Vercel project (GitHub repo `Thunderdoc/AI-Laundry-Assistant`, framework Vite).
+
 ## Deploy the website
 
 1. Push this project to GitHub and import it into Vercel, or run `vercel` from this project folder.
@@ -11,7 +13,7 @@ This Vercel configuration deploys the React website. The current ML API should r
 
 ## Deploy the API
 
-Build and deploy the Docker image using the existing `Dockerfile` to a container host. Give the API its own HTTPS URL and set `CORS_ORIGINS` there to your Vercel URL (for example `https://laundryai.vercel.app`). Set all Firebase variables and the `FIREBASE_SERVICE_ACCOUNT_JSON` secret on the API host.
+Build and deploy the Docker image using the existing `Dockerfile` to a container host. Give the API its own HTTPS URL and set `CORS_ORIGINS` there to your Vercel URL (for this project: `https://ai-laundry-assistant-thunderdoc.vercel.app`). Set the Supabase variables (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_BUCKET`, `PERSISTENCE_BACKEND=supabase`) and the `FIREBASE_SERVICE_ACCOUNT_JSON` secret on the API host. Firebase Auth still verifies sign-ins; only durable storage moved to Supabase.
 
 ## Firebase after Vercel
 
@@ -23,10 +25,12 @@ Do not put `FIREBASE_SERVICE_ACCOUNT_JSON` in Vercel. It is a private backend-on
 
 ## Verify this deployment
 
-Open `https://ai-laundry-assistant.onrender.com/api/health` first. Connect or redeploy the frontend only when it reports `"model_ready": true`. The backend now includes a `model_error` field whenever model validation fails. On Render, set `MODEL_PATH=backend/models/fabric_mobilenetv2.pt`; the API also falls back to the tracked bundled model if a stale configured path does not exist.
+Open `https://ai-laundry-assistant.onrender.com/api/health` first. Connect or redeploy the frontend only when it reports `"model_ready": true` and `"persistence": {"backend": "supabase", "configured": true, ...}`. The backend now includes a `model_error` field whenever model validation fails. Do **not** set `MODEL_PATH` on Render: an explicit `MODEL_PATH` disables the combo G ensemble and serves a single model instead. With `MODEL_PATH` unset, the server loads the tracked ensemble (manifest + md5-verified parts under `backend/backend/models/`).
 
 Render currently defaults new Python services to Python 3.14, which is incompatible with this TorchScript runtime. This repository pins `backend/.python-version` to `3.11.11`. Also set `PYTHON_VERSION=3.11.11` in the Render service environment so it takes precedence, then rebuild without relying on the old Python 3.14 environment.
 
-## Enable durable Firebase persistence
+## Persistence: Supabase (live)
 
-On Render, add `FIREBASE_DATABASE_URL` using the Realtime Database URL and set `PERSISTENCE_BACKEND=firebase`. The existing `FIREBASE_STORAGE_BUCKET` and valid service-account JSON are also required. Once enabled, predictions and review metadata are stored in Realtime Database, and private/pending/approved images are stored in Firebase Storage. If any required value is missing, `/api/health` reports a degraded persistence configuration instead of silently losing records to Render's temporary disk.
+The live backend stores predictions in Supabase Postgres and images in Supabase Storage. On Render, set `PERSISTENCE_BACKEND=supabase` with `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_BUCKET`. Firebase Auth still handles sign-in; only durable storage moved. If any required value is missing, `/api/health` reports a degraded persistence configuration instead of silently losing records to Render's temporary disk.
+
+The Firebase Realtime Database path (`PERSISTENCE_BACKEND=firebase` with `FIREBASE_DATABASE_URL`, `FIREBASE_STORAGE_BUCKET`, and a service-account credential) is the legacy alternative — see `docs/18_firebase_persistence_setup.md`.

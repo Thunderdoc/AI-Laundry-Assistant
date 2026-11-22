@@ -3,9 +3,18 @@
 # hand-configuring a service whose env vars then drift (the cause of the
 # live "degraded" persistence state in Oct 2026).
 #
+# Refreshed 2026-11-21 to match the live service (verified via /api/health):
+# CORS names the canonical Vercel URL and persistence is Supabase. The live
+# service was hand-configured before this file existed; this Blueprint is the
+# starting point for a fresh service, and its values now match live reality.
+#
 # Apply with: Render dashboard -> New -> Blueprint -> connect this repo.
 # Secret values are sync:false on purpose: Render prompts for them in the
 # dashboard and they are never committed here.
+#
+# MODEL_PATH is intentionally NOT set: an explicit MODEL_PATH disables the
+# combo G ensemble (the server serves a single model instead). Leave it unset
+# so the tracked ensemble (manifest + verified parts) serves.
 services:
   - type: web
     name: ai-laundry-assistant
@@ -16,7 +25,7 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: PERSISTENCE_BACKEND
-        value: firebase
+        value: supabase
       - key: FIREBASE_API_KEY
         sync: false
       - key: FIREBASE_AUTH_DOMAIN
@@ -40,4 +49,4 @@ services:
       - key: SUPABASE_BUCKET
         sync: false
       - key: CORS_ORIGINS
-        value: https://ai-laundry-assistant-p9lqnjvi8-thunderdoc.vercel.app
+        value: https://ai-laundry-assistant-thunderdoc.vercel.app
